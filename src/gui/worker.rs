@@ -4228,6 +4228,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 .await;
                                 let cancelled = crate::history_sync::PHONE_SYNC_CANCEL
                                     .load(Ordering::Relaxed);
+                                // Read while PHONE_SYNC_RUNNING is still set: a new run clears
+                                // this global as soon as it starts.
+                                let phone_error = crate::history_sync::last_phone_sync_error();
                                 match res {
                                     Ok((added, active_threads)) => {
                                         let _ = gui_tx_clone.send(GuiEvent::PhoneSyncFinished {
@@ -4236,6 +4239,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             active_threads,
                                             cancelled,
                                             error: None,
+                                            phone_error,
                                         });
                                     }
                                     Err(e) => {
@@ -4245,6 +4249,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             active_threads: 0,
                                             cancelled,
                                             error: Some(e.to_string()),
+                                            phone_error,
                                         });
                                     }
                                 }
