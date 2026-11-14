@@ -1419,6 +1419,9 @@ pub(crate) struct IncomingPopupState {
     pub(crate) reply_draft: String,
 }
 
+/// Message search hits for the sidebar: (thread_idx, msg_id, sender, text, is_outgoing).
+pub(crate) type MsgHits = Vec<(usize, String, String, String, bool)>;
+
 pub struct ZaloGuiApp {
     // Theme state
     dark_mode: bool,
@@ -1472,6 +1475,9 @@ pub struct ZaloGuiApp {
     pub(crate) video_player: Option<VideoPlayerModal>,
 
     info_drawer_open: bool,
+    /// Sidebar list cache (query, filter, len, fingerprint, selected, indices, at).
+    /// Avoids re-filter+sort (~1300 threads) every repaint (#135).
+    thread_list_cache: crate::gui::workspace::ThreadListCache,
     profile_menu_open: bool,
     /// "Xoá dữ liệu tin nhắn cục bộ" is pending confirmation (#21).
     wipe_confirm_open: bool,
@@ -1844,6 +1850,7 @@ impl ZaloGuiApp {
             video_player: None,
             status_msg: "Trực tuyến · Sẵn sàng".into(),
             info_drawer_open: loaded_settings.info_drawer_open,
+            thread_list_cache: None,
             profile_menu_open: false,
             wipe_confirm_open: false,
             logout_confirm_open: false,
