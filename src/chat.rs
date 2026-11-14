@@ -1264,7 +1264,7 @@ fn merge_delivery_state(
     }
 }
 
-fn apply_recall_merge(existing: &mut ChatMessage, incoming_text: &str) {
+pub(crate) fn apply_recall_merge(existing: &mut ChatMessage, incoming_text: &str) {
     let inc_trim = incoming_text.trim();
     let ex_trim = existing.text.trim();
     if inc_trim == "[Tin nhắn đã thu hồi]" {
@@ -1273,10 +1273,22 @@ fn apply_recall_merge(existing: &mut ChatMessage, incoming_text: &str) {
         } else if !ex_trim.starts_with("[Đã thu hồi]") {
             existing.text = format!("[Đã thu hồi] {}", existing.text);
         }
-    } else if ex_trim == "[Tin nhắn đã thu hồi]"
-        && !inc_trim.is_empty()
-        && !inc_trim.starts_with("[Đã thu hồi]")
-    {
+    } else if inc_trim.starts_with("[Đã thu hồi]") {
+        let inc_body = inc_trim.strip_prefix("[Đã thu hồi]").unwrap_or("").trim();
+        if ex_trim == "[Tin nhắn đã thu hồi]" || ex_trim.is_empty() {
+            if !inc_body.is_empty() {
+                existing.text = incoming_text.to_string();
+            } else if ex_trim.is_empty() {
+                existing.text = "[Tin nhắn đã thu hồi]".to_string();
+            }
+        } else if !ex_trim.starts_with("[Đã thu hồi]") {
+            if !inc_body.is_empty() && ex_trim.is_empty() {
+                existing.text = incoming_text.to_string();
+            } else {
+                existing.text = format!("[Đã thu hồi] {}", existing.text);
+            }
+        }
+    } else if ex_trim == "[Tin nhắn đã thu hồi]" && !inc_trim.is_empty() {
         existing.text = format!("[Đã thu hồi] {incoming_text}");
     }
 }
@@ -1368,6 +1380,10 @@ pub fn merge_thread_into(
     target.presentation.pinned = target.presentation.pinned || incoming.presentation.pinned;
     target.presentation.muted = target.presentation.muted || incoming.presentation.muted;
     target.presentation.hidden = target.presentation.hidden || incoming.presentation.hidden;
+    target.unread.merge_metadata(&incoming.unread);
+    if let Some(ref point) = incoming.unread.last_seen_id {
+        target.unread.advance_seen(point);
+    }
 
     // Repeated text and timestamps are not identities. Keep ambiguous keys instead of
     // choosing the first candidate, especially when multiple pending sends collide.
@@ -1421,6 +1437,15 @@ pub fn merge_thread_into(
                 {
                     existing_msg.text = msg.text;
                 }
+            }
+            if existing_msg.kind == crate::message_model::MessageKind::Text
+                && msg.kind != crate::message_model::MessageKind::Text
+                && msg.kind != crate::message_model::MessageKind::Recall
+            {
+                existing_msg.kind = msg.kind;
+            }
+            if existing_msg.history_source.is_none() && msg.history_source.is_some() {
+                existing_msg.history_source = msg.history_source;
             }
             if existing_msg.reactions.is_empty() && !msg.reactions.is_empty() {
                 existing_msg.reactions = msg.reactions;
@@ -11056,5 +11081,59 @@ mod send_identity_tests {
             Some("https://example.com/banner.jpg")
         );
         assert_eq!(cm.link_title.as_deref(), Some("Khám phá công nghệ mới"));
+    }
+
+    #[test]
+    fn merge_thread_into_advances_read_point_and_preserves_recall_kind() {
+        let mut target = Thread {
+            id: "t1".into(),
+            unread: crate::unread::UnreadState {
+                last_seen_id: Some("100".into()),
+                ..Default::default()
+            },
+            messages: vec![ChatMessage {
+                id: "50".into(),
+                text: "[Tin nhắn đã thu hồi]".into(),
+                kind: crate::message_model::MessageKind::Text,
+                ts: 1000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let incoming = Thread {
+            id: "t1".into(),
+            unread: crate::unread::UnreadState {
+                last_seen_id: Some("250".into()),
+                fresh: true,
+                ..Default::default()
+            },
+            messages: vec![ChatMessage {
+                id: "50".into(),
+                text: "[Video]".into(),
+                kind: crate::message_model::MessageKind::Video,
+                ts: 1000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        merge_thread_into(&mut target, incoming, true);
+        assert_eq!(target.unread.last_seen_id.as_deref(), Some("250"));
+        assert_eq!(target.messages[0].text, "[Đã thu hồi] [Video]");
+        assert_eq!(
+            target.messages[0].kind,
+            crate::message_model::MessageKind::Video
+        );
+
+        // Older read-point never moves cursor backward.
+        let older = Thread {
+            id: "t1".into(),
+            unread: crate::unread::UnreadState {
+                last_seen_id: Some("150".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        merge_thread_into(&mut target, older, false);
+        assert_eq!(target.unread.last_seen_id.as_deref(), Some("250"));
     }
 }

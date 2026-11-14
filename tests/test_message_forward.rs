@@ -332,6 +332,7 @@ async fn test_rich_link_forward_fallback_preserves_url() {
         zpw_enk: "".into(),
         zpw_sek: "1111222233334444".into(),
         send2me_id: "".into(),
+        phone: "".into(),
     });
     session.imei = "test-imei-client-id-01".into();
     session.secret_key = Some(b"1111222233334444".to_vec());
@@ -479,6 +480,7 @@ async fn test_outbound_forward_dispatch_direct_and_group() {
         zpw_enk: "".into(),
         zpw_sek: "1111222233334444".into(),
         send2me_id: "".into(),
+        phone: "".into(),
     });
     session.imei = "test-imei-client-id-01".into();
     session.secret_key = Some(b"1111222233334444".to_vec());
@@ -759,6 +761,7 @@ async fn test_rich_link_forward_priority_over_photo_cdn() {
         zpw_enk: "".into(),
         zpw_sek: "1111222233334444".into(),
         send2me_id: "".into(),
+        phone: "".into(),
     });
     session.imei = "test-imei".into();
     session.secret_key = Some(b"1111222233334444".to_vec());

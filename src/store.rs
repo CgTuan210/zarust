@@ -1178,20 +1178,77 @@ impl MessageStore {
                 msg.raw_json,
             ],
         )?;
-        let is_tombstone = msg.raw_json.is_empty()
-            && msg.text.trim() == crate::chat::VANISH_EXPIRED_TEXT;
-        if rows == 0 && (!msg.raw_json.is_empty() || is_tombstone) {
-            let raw = if is_tombstone {
-                // Non-empty tombstone marker so the row is never skipped or
-                // re-hydrated as original content; hydrate ignores `vanished`.
-                VANISH_TOMBSTONE_JSON
-            } else {
-                msg.raw_json.as_str()
-            };
-            let _ = self.conn.execute(
-                "UPDATE messages SET raw_json = ?1, msg_type = ?2, text = ?4 WHERE msg_id = ?3",
-                params![raw, msg.msg_type, msg.msg_id, msg.text],
-            );
+        let trimmed = msg.text.trim();
+        let is_tombstone =
+            msg.raw_json.is_empty() && trimmed == crate::chat::VANISH_EXPIRED_TEXT;
+        let is_incoming_undo = !is_tombstone
+            && (trimmed == "[Tin nhắn đã thu hồi]"
+                || msg.msg_type == "chat.undo"
+                || msg.msg_type == "undo");
+        if rows == 0 {
+            if is_tombstone {
+                let _ = self.conn.execute(
+                    "UPDATE messages SET raw_json = ?1, msg_type = ?2, text = ?4 WHERE msg_id = ?3",
+                    params![
+                        VANISH_TOMBSTONE_JSON,
+                        msg.msg_type,
+                        msg.msg_id,
+                        msg.text
+                    ],
+                );
+            } else if is_incoming_undo {
+                // Anti-recall: never overwrite saved original text, raw_json, or msg_type
+                // with a `[Tin nhắn đã thu hồi]` / `chat.undo` payload; mark existing content.
+                let _ = self.conn.execute(
+                    "UPDATE messages
+                     SET text = '[Đã thu hồi] ' || text
+                     WHERE msg_id = ?1
+                       AND TRIM(text) != ''
+                       AND TRIM(text) != '[Tin nhắn đã thu hồi]'
+                       AND TRIM(text) NOT LIKE '[Đã thu hồi]%'
+                       AND raw_json NOT LIKE '%\"vanished\":true%'",
+                    params![msg.msg_id],
+                );
+            } else if !msg.raw_json.is_empty() {
+                let _ = self.conn.execute(
+                    "UPDATE messages
+                     SET raw_json = ?1,
+                         msg_type = ?2,
+                         text = CASE
+                             WHEN TRIM(?4) LIKE '[Đã thu hồi]%' THEN
+                                 CASE
+                                     WHEN LENGTH(TRIM(?4)) > 14 THEN ?4
+                                     WHEN TRIM(text) != '' AND TRIM(text) != '[Tin nhắn đã thu hồi]' AND TRIM(text) NOT LIKE '[Đã thu hồi]%'
+                                         THEN '[Đã thu hồi] ' || text
+                                     ELSE text
+                                 END
+                             WHEN TRIM(text) = '[Tin nhắn đã thu hồi]' AND TRIM(?4) != ''
+                                 THEN '[Đã thu hồi] ' || ?4
+                             WHEN TRIM(text) LIKE '[Đã thu hồi]%' AND LENGTH(TRIM(text)) > 14
+                                 THEN text
+                             WHEN TRIM(text) LIKE '[Đã thu hồi]%' AND TRIM(?4) != ''
+                                 THEN '[Đã thu hồi] ' || ?4
+                             WHEN TRIM(?4) != '' THEN ?4
+                             ELSE text
+                         END
+                     WHERE msg_id = ?3
+                       AND raw_json NOT LIKE '%\"vanished\":true%'",
+                    params![msg.raw_json, msg.msg_type, msg.msg_id, msg.text],
+                );
+            } else if trimmed.starts_with("[Đã thu hồi]") {
+                let _ = self.conn.execute(
+                    "UPDATE messages
+                     SET text = CASE
+                         WHEN LENGTH(TRIM(?2)) > 14 THEN ?2
+                         WHEN TRIM(text) != '' AND TRIM(text) != '[Tin nhắn đã thu hồi]' AND TRIM(text) NOT LIKE '[Đã thu hồi]%'
+                             THEN '[Đã thu hồi] ' || text
+                         ELSE text
+                     END
+                     WHERE msg_id = ?1
+                       AND raw_json NOT LIKE '%\"vanished\":true%'",
+                    params![msg.msg_id, msg.text],
+                );
+            }
         }
         Ok(rows > 0)
     }
@@ -1930,6 +1987,13 @@ impl MessageStore {
                                     && cm.ts != 0
                                     && (existing.ts - cm.ts).abs() < 5000)))
                 }) {
+                    crate::chat::apply_recall_merge(existing, &cm.text);
+                    if existing.kind == crate::message_model::MessageKind::Text
+                        && cm.kind != crate::message_model::MessageKind::Text
+                        && cm.kind != crate::message_model::MessageKind::Recall
+                    {
+                        existing.kind = cm.kind;
+                    }
                     if existing.sticker_id.is_none() && cm.sticker_id.is_some() {
                         existing.sticker_id = cm.sticker_id;
                         existing.sticker_cate_id = cm.sticker_cate_id;
@@ -1946,7 +2010,10 @@ impl MessageStore {
                         existing.link_desc = cm.link_desc;
                         existing.link_thumb = cm.link_thumb;
                         existing.link_src = cm.link_src;
-                        if !cm.text.is_empty() {
+                        if !cm.text.is_empty()
+                            && !existing.text.starts_with("[Đã thu hồi]")
+                            && existing.text.trim() != "[Tin nhắn đã thu hồi]"
+                        {
                             existing.text = cm.text;
                         }
                     }
@@ -3511,6 +3578,123 @@ mod tests {
             expired.text.trim() == crate::chat::VANISH_EXPIRED_TEXT
                 || expired.raw_json.trim() == crate::store::VANISH_TOMBSTONE_JSON
         );
+    }
+
+    #[test]
+    fn anti_recall_preserves_original_text_and_media_on_undo_and_hydrate() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let photo_meta = serde_json::json!({
+            "link_url": "https://f60-zpg-r.zdn.vn/photo.jpg",
+            "link_thumb": "https://f60-zpg-r.zdn.vn/thumb.jpg",
+            "link_src": "Hình ảnh Zalo"
+        })
+        .to_string();
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_photo".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Hình ảnh] Ảnh hợp đồng".into(),
+                msg_type: "chat.photo".into(),
+                ts: 1000,
+                is_outgoing: false,
+                raw_json: photo_meta.clone(),
+            })
+            .unwrap();
+        // Server sync / undo payload with non-empty metadata must not erase text or link_url.
+        assert!(!store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_photo".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Tin nhắn đã thu hồi]".into(),
+                msg_type: "chat.undo".into(),
+                ts: 2000,
+                is_outgoing: false,
+                raw_json: "{\"undo\":true}".into(),
+            })
+            .unwrap());
+        // Reverse order: recall stub saved first, then original sticker sync arrives later.
+        let sticker_meta = serde_json::json!({
+            "stickerId": 18009,
+            "cateId": 10130,
+            "type": 7
+        })
+        .to_string();
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_stk".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Tin nhắn đã thu hồi]".into(),
+                msg_type: "chat.undo".into(),
+                ts: 3000,
+                is_outgoing: false,
+                raw_json: String::new(),
+            })
+            .unwrap();
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_stk".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Nhãn dán]".into(),
+                msg_type: "chat.sticker".into(),
+                ts: 3000,
+                is_outgoing: false,
+                raw_json: sticker_meta,
+            })
+            .unwrap();
+
+        let rows = store.messages_for("t1", 10).unwrap();
+        let p = rows.iter().find(|r| r.msg_id == "m_photo").unwrap();
+        assert_eq!(p.text, "[Đã thu hồi] [Hình ảnh] Ảnh hợp đồng");
+        assert_eq!(p.raw_json, photo_meta);
+        let s = rows.iter().find(|r| r.msg_id == "m_stk").unwrap();
+        assert_eq!(s.text, "[Đã thu hồi] [Nhãn dán]");
+
+        // Server snapshot in RAM has bare "[Tin nhắn đã thu hồi]" stub; hydrate must restore content + media.
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "t1".into(),
+                name: "Alice".into(),
+                is_group: false,
+                last_ts: 3000,
+                vanish_duration_sec: 0,
+                vanish_started_at_sec: 0,
+                last_read_msg_id: String::new(),
+            })
+            .unwrap();
+        let mut threads = vec![Thread {
+            id: "t1".into(),
+            name: "Alice".into(),
+            messages: vec![
+                ChatMessage {
+                    id: "m_photo".into(),
+                    text: "[Tin nhắn đã thu hồi]".into(),
+                    ts: 1000,
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "m_stk".into(),
+                    text: "[Tin nhắn đã thu hồi]".into(),
+                    ts: 3000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+        store.hydrate_threads(&mut threads, 10).unwrap();
+        let hp = threads[0].messages.iter().find(|m| m.id == "m_photo").unwrap();
+        assert_eq!(hp.text, "[Đã thu hồi] [Hình ảnh] Ảnh hợp đồng");
+        assert_eq!(hp.link_url.as_deref(), Some("https://f60-zpg-r.zdn.vn/photo.jpg"));
+        let hs = threads[0].messages.iter().find(|m| m.id == "m_stk").unwrap();
+        assert_eq!(hs.text, "[Đã thu hồi] [Nhãn dán]");
+        assert_eq!(hs.sticker_id, Some(18009));
     }
     #[test]
     fn test_persist_threads_and_upsert_thread() {

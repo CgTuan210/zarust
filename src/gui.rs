@@ -1538,6 +1538,8 @@ pub struct ZaloGuiApp {
     pending_clipboard_image: Option<(std::path::PathBuf, u32, u32, TextureHandle)>,
     unread_counts: HashMap<String, usize>,
     reaction_unread_counts: HashMap<String, usize>,
+    /// Message IDs that have already triggered an unread bump/notification in this session (#146).
+    notified_msg_ids: HashSet<String>,
     link_metadata_cache: HashMap<String, crate::chat::LinkMetadata>,
     loading_link_previews: HashSet<String>,
     /// Tin đang chờ dịch (translate_request_key) → disable menu Dịch.
@@ -1916,6 +1918,7 @@ impl ZaloGuiApp {
             pending_clipboard_image: None,
             unread_counts: HashMap::new(),
             reaction_unread_counts: HashMap::new(),
+            notified_msg_ids: HashSet::new(),
             link_metadata_cache: HashMap::new(),
             loading_link_previews: HashSet::new(),
             translate_pending: HashSet::new(),
@@ -2515,6 +2518,43 @@ impl ZaloGuiApp {
         }
     }
 
+    /// Clear active thread's unread badge and advance its read-point when focused (#146).
+    fn mark_active_thread_read_if_focused(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.focused) {
+            return;
+        }
+        let Some(t) = self.threads.get_mut(self.selected_thread_index) else {
+            return;
+        };
+        let tid = t.id.clone();
+        let had_unread = self.unread_counts.remove(&tid).is_some();
+        let had_react = self.reaction_unread_counts.remove(&tid).is_some();
+        if !had_unread && !had_react {
+            return;
+        }
+        for m in &t.messages {
+            if !m.id.is_empty() {
+                self.notified_msg_ids.insert(m.id.clone());
+            }
+        }
+        if let Some(mid) = advance_thread_read_point(t) {
+            let uin_c = self.user_uin.clone();
+            std::thread::spawn(move || {
+                let db = crate::store::db_path_for_account(&uin_c);
+                if let Ok(mut store) = crate::store::MessageStore::open(&db) {
+                    let _ = store.set_thread_read(&tid, &mid);
+                }
+            });
+        }
+        let total_unread: usize = self.unread_counts.values().sum();
+        let title = if total_unread > 0 {
+            format!("({total_unread}) ctdozlite")
+        } else {
+            "ctdozlite".to_string()
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+    }
+
     fn check_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
@@ -2569,6 +2609,7 @@ impl ZaloGuiApp {
                         self.threads.clear();
                         self.unread_counts.clear();
                         self.reaction_unread_counts.clear();
+                        self.notified_msg_ids.clear();
                         self.history_reached_start.clear();
                         self.selected_thread_index = 0;
                     }
@@ -2634,7 +2675,14 @@ impl ZaloGuiApp {
                                     || existing.unread.is_muted()
                                     || nt.presentation.muted
                                     || nt.unread.is_muted();
+                                let was_empty = existing.messages.is_empty();
                                 let old_len = existing.messages.len();
+                                let old_max_ts = existing
+                                    .messages
+                                    .iter()
+                                    .map(|m| m.ts)
+                                    .max()
+                                    .unwrap_or(0);
                                 let old_ids: std::collections::HashSet<String> = existing
                                     .messages
                                     .iter()
@@ -2642,105 +2690,129 @@ impl ZaloGuiApp {
                                     .map(|m| m.id.clone())
                                     .collect();
                                 crate::chat::merge_thread_into(existing, nt, true);
-                                let added = existing.messages.len().saturating_sub(old_len);
-                                if added > 0 {
+                                if was_empty && existing.unread.last_seen_id.is_none() {
+                                    // Empty thread receiving its initial history snapshot must not fire alerts.
+                                    let _ = advance_thread_read_point(existing);
+                                } else {
                                     let seen = existing.unread.last_seen_id.as_deref().unwrap_or("");
-                                    let inc_cnt = existing
-                                        .messages
-                                        .iter()
-                                        .rev()
-                                        .take(added)
-                                        .filter(|m| {
-                                            if m.is_outgoing {
-                                                return false;
-                                            }
-                                            if seen.is_empty() {
-                                                return true;
-                                            }
-                                            matches!(
-                                                crate::unread::compare_ids(&m.id, seen),
-                                                Some(std::cmp::Ordering::Greater) | None
-                                            )
-                                        })
-                                        .count();
-                                    if inc_cnt > 0 {
-                                        if !is_thread_muted {
-                                            new_incoming_alert = true;
+                                    let fresh_unread_ids: Vec<(String, String, String)> =
+                                        collect_fresh_incoming_unread(
+                                            &existing.messages,
+                                            seen,
+                                            &old_ids,
+                                            old_max_ts,
+                                        )
+                                        .into_iter()
+                                        .map(|m| (m.id.clone(), m.sender.clone(), m.text.clone()))
+                                        .collect();
+                                    if !fresh_unread_ids.is_empty() {
+                                        if self.notified_msg_ids.len() > 8192 {
+                                            self.notified_msg_ids.clear();
                                         }
-                                        if existing.id != active_tid || !is_focused {
-                                            *self
-                                                .unread_counts
-                                                .entry(existing.id.clone())
-                                                .or_insert(0) += inc_cnt;
-                                            if !is_thread_muted {
-                                                if let Some(last_inc) = existing
-                                                    .messages
-                                                    .iter()
-                                                    .rev()
-                                                    .take(added)
-                                                    .find(|m| !m.is_outgoing)
-                                                {
-                                                    let sender_label = if existing.is_group
-                                                        && !last_inc.sender.is_empty()
+                                        if existing.id == active_tid && is_focused {
+                                            for (mid, _, _) in &fresh_unread_ids {
+                                                self.notified_msg_ids.insert(mid.clone());
+                                            }
+                                            self.unread_counts.remove(&existing.id);
+                                            if let Some(mid) = advance_thread_read_point(existing) {
+                                                let tid_c = existing.id.clone();
+                                                let uin_c = self.user_uin.clone();
+                                                std::thread::spawn(move || {
+                                                    let db = crate::store::db_path_for_account(&uin_c);
+                                                    if let Ok(mut store) =
+                                                        crate::store::MessageStore::open(&db)
                                                     {
-                                                        format!(
-                                                            "{} · {}",
-                                                            last_inc.sender, existing.name
-                                                        )
-                                                    } else {
-                                                        existing.name.clone()
-                                                    };
-                                                    let preview_raw = last_inc.text.trim();
-                                                    let preview_short: String =
-                                                        if preview_raw.chars().count() > 96 {
-                                                            let s: String = preview_raw
-                                                                .chars()
-                                                                .take(96)
-                                                                .collect();
-                                                            format!("{s}…")
-                                                        } else if preview_raw.is_empty() {
-                                                            "[ Đính kèm / Nhãn dán ]".to_string()
-                                                        } else {
-                                                            preview_raw.to_string()
-                                                        };
-                                                    let avt_url = existing
-                                                        .avatar
-                                                        .clone()
-                                                        .filter(|u| !u.trim().is_empty());
-                                                    if let Some(ref url) = avt_url {
-                                                        let tex_key = format!(
-                                                            "thumb_{}",
-                                                            crate::crypto::md5_hex(url)
-                                                        );
-                                                        queue_sticker_fetch(
-                                                            &self.sticker_textures,
-                                                            &mut self.loading_stickers,
-                                                            &self.failed_stickers,
-                                                            tex_key,
-                                                            url.clone(),
-                                                        );
+                                                        let _ = store.set_thread_read(&tid_c, &mid);
                                                     }
-                                                    let unread_for_thread = self
-                                                        .unread_counts
-                                                        .get(&existing.id)
-                                                        .copied()
-                                                        .unwrap_or(1);
-                                                    self.incoming_popup =
-                                                        Some(IncomingPopupState {
-                                                            thread_id: existing.id.clone(),
-                                                            sender_name: sender_label.clone(),
-                                                            preview_text: preview_short.clone(),
-                                                            avatar_url: avt_url,
-                                                            is_group: existing.is_group,
-                                                            unread_total: unread_for_thread,
-                                                            created_at: std::time::Instant::now(),
-                                                            reply_draft: String::new(),
-                                                        });
-                                                    chat_banners.push((sender_label, preview_short));
+                                                });
+                                            }
+                                        } else {
+                                            let notify_items: Vec<(String, String, String)> =
+                                                fresh_unread_ids
+                                                    .into_iter()
+                                                    .filter(|(mid, _, _)| {
+                                                        self.notified_msg_ids.insert(mid.clone())
+                                                    })
+                                                    .collect();
+                                            let inc_cnt = notify_items.len();
+                                            if inc_cnt > 0 {
+                                                *self
+                                                    .unread_counts
+                                                    .entry(existing.id.clone())
+                                                    .or_insert(0) += inc_cnt;
+                                                if !is_thread_muted {
+                                                    new_incoming_alert = true;
+                                                    if let Some((_, sender_raw, text_raw)) =
+                                                        notify_items.last()
+                                                    {
+                                                        let sender_label = if existing.is_group
+                                                            && !sender_raw.is_empty()
+                                                        {
+                                                            format!(
+                                                                "{} · {}",
+                                                                sender_raw, existing.name
+                                                            )
+                                                        } else {
+                                                            existing.name.clone()
+                                                        };
+                                                        let preview_raw = text_raw.trim();
+                                                        let preview_short: String =
+                                                            if preview_raw.chars().count() > 96 {
+                                                                let s: String = preview_raw
+                                                                    .chars()
+                                                                    .take(96)
+                                                                    .collect();
+                                                                format!("{s}…")
+                                                            } else if preview_raw.is_empty() {
+                                                                "[ Đính kèm / Nhãn dán ]"
+                                                                    .to_string()
+                                                            } else {
+                                                                preview_raw.to_string()
+                                                            };
+                                                        let avt_url = existing
+                                                            .avatar
+                                                            .clone()
+                                                            .filter(|u| !u.trim().is_empty());
+                                                        if let Some(ref url) = avt_url {
+                                                            let tex_key = format!(
+                                                                "thumb_{}",
+                                                                crate::crypto::md5_hex(url)
+                                                            );
+                                                            queue_sticker_fetch(
+                                                                &self.sticker_textures,
+                                                                &mut self.loading_stickers,
+                                                                &self.failed_stickers,
+                                                                tex_key,
+                                                                url.clone(),
+                                                            );
+                                                        }
+                                                        let unread_for_thread = self
+                                                            .unread_counts
+                                                            .get(&existing.id)
+                                                            .copied()
+                                                            .unwrap_or(1);
+                                                        self.incoming_popup =
+                                                            Some(IncomingPopupState {
+                                                                thread_id: existing.id.clone(),
+                                                                sender_name: sender_label.clone(),
+                                                                preview_text: preview_short.clone(),
+                                                                avatar_url: avt_url,
+                                                                is_group: existing.is_group,
+                                                                unread_total: unread_for_thread,
+                                                                created_at:
+                                                                    std::time::Instant::now(),
+                                                                reply_draft: String::new(),
+                                                            });
+                                                        chat_banners
+                                                            .push((sender_label, preview_short));
+                                                    }
                                                 }
                                             }
                                         }
                                     }
+                                }
+                                let added = existing.messages.len().saturating_sub(old_len);
+                                if added > 0 {
                                     // Group Workspace: tin mới khớp từ khóa → toast ưu tiên.
                                     // Chỉ tin live (id chưa từng thấy) mới match — history
                                     // load (LoadGroupHistory merge) không bắn toast trùng.
@@ -2817,27 +2889,25 @@ impl ZaloGuiApp {
                                     || nt.unread.is_muted();
                                 let seen = nt.unread.last_seen_id.as_deref().unwrap_or("");
                                 if seen.is_empty() {
-                                    if let Some(newest) = nt.messages.last() {
-                                        nt.unread.last_seen_id = Some(newest.id.clone());
-                                    }
+                                    let _ = advance_thread_read_point(&mut nt);
                                     self.threads.push(nt);
                                     continue;
                                 }
-                                let inc_cnt = nt
+                                let unseen_items: Vec<(String, String, String)> = nt
                                     .messages
                                     .iter()
                                     .filter(|m| {
-                                        if m.is_outgoing {
-                                            return false;
-                                        }
-                                        // Tin mới hơn read-point, hoặc id không so được
-                                        // (non-numeric) thì đếm cho chắc.
-                                        matches!(
-                                            crate::unread::compare_ids(&m.id, seen),
-                                            Some(std::cmp::Ordering::Greater) | None
-                                        )
+                                        !m.is_outgoing
+                                            && m.kind != crate::message_model::MessageKind::System
+                                            && m.unread_policy.counts_unread()
+                                            && crate::unread::compare_ids(&m.id, seen)
+                                                == Some(std::cmp::Ordering::Greater)
+                                            && (m.id.is_empty()
+                                                || self.notified_msg_ids.insert(m.id.clone()))
                                     })
-                                    .count();
+                                    .map(|m| (m.id.clone(), m.sender.clone(), m.text.clone()))
+                                    .collect();
+                                let inc_cnt = unseen_items.len();
                                 if inc_cnt > 0 && (nt.id != active_tid || !is_focused) {
                                     *self.unread_counts.entry(nt.id.clone()).or_insert(0) +=
                                         inc_cnt;
@@ -2847,18 +2917,13 @@ impl ZaloGuiApp {
                                     && (nt.id != active_tid || !is_focused)
                                 {
                                     new_incoming_alert = true;
-                                    if let Some(latest) = nt
-                                        .messages
-                                        .iter()
-                                        .rev()
-                                        .find(|m| !m.is_outgoing)
-                                    {
-                                        let sender = if nt.is_group && !latest.sender.is_empty() {
-                                            format!("{} · {}", latest.sender, nt.name)
+                                    if let Some((_, sender_raw, text_raw)) = unseen_items.last() {
+                                        let sender = if nt.is_group && !sender_raw.is_empty() {
+                                            format!("{} · {}", sender_raw, nt.name)
                                         } else {
                                             nt.name.clone()
                                         };
-                                        let preview_raw = latest.text.trim();
+                                        let preview_raw = text_raw.trim();
                                         let preview_short: String =
                                             if preview_raw.chars().count() > 96 {
                                                 let s: String = preview_raw
@@ -2969,6 +3034,9 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::LocalDataWiped => {
                     self.threads.clear();
+                    self.unread_counts.clear();
+                    self.reaction_unread_counts.clear();
+                    self.notified_msg_ids.clear();
                     self.selected_thread_index = 0;
                     // Sweep không còn gì để quét — clear để đổi acc sau không quét nhầm (#875).
                     if let Ok(mut watch) = VANISH_THREADS.lock() {
@@ -3002,6 +3070,9 @@ impl ZaloGuiApp {
                     crate::account_manager::set_active_uin("");
                     self.background_unread.clear();
                     self.threads.clear();
+                    self.unread_counts.clear();
+                    self.reaction_unread_counts.clear();
+                    self.notified_msg_ids.clear();
                     if let Ok(mut watch) = VANISH_THREADS.lock() {
                         watch.clear();
                     }
@@ -3044,6 +3115,7 @@ impl ZaloGuiApp {
                     // from the read-points so messages stored while this account was in
                     // the background still show as unread.
                     self.reaction_unread_counts.clear();
+                    self.notified_msg_ids.clear();
                     self.unread_counts = unread_counts_from_read_points(&threads);
                     self.user_name = name.clone();
                     self.user_avatar = avatar;
@@ -4710,6 +4782,7 @@ impl eframe::App for ZaloGuiApp {
                     self.render_login_screen(ui, &pal);
                 });
         } else {
+            self.mark_active_thread_read_if_focused(ctx);
             self.render_chat_workspace(ctx, &pal);
         }
 
@@ -5791,6 +5864,63 @@ fn detect_windows_os_dark_mode() -> Option<bool> {
     }
 }
 
+/// Advance a thread's local read-point monotonically using visible numeric IDs,
+/// falling back to the last non-empty message ID when no numeric ID exists.
+pub(crate) fn advance_thread_read_point(thread: &mut Thread) -> Option<String> {
+    let before = thread.unread.last_seen_id.clone();
+    thread.unread.read_visible(&thread.messages);
+    if thread.unread.last_seen_id.is_none() {
+        if let Some(last_id) = thread
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| (!m.id.is_empty()).then(|| m.id.clone()))
+        {
+            thread.unread.last_seen_id = Some(last_id);
+        }
+    }
+    if thread.unread.last_seen_id.is_some() {
+        thread.unread.last_seen_id.clone()
+    } else {
+        before
+    }
+}
+
+/// Filter incoming unread messages added to an existing thread after `merge_thread_into`.
+///
+/// Ignores outgoing/system messages, messages already present before merge, older backfilled
+/// messages (`ts < old_max_ts`), non-orderable IDs when a read-point exists, and anything
+/// at or behind `seen` (#146).
+fn collect_fresh_incoming_unread<'a>(
+    messages: &'a [ChatMessage],
+    seen: &str,
+    old_ids: &HashSet<String>,
+    old_max_ts: i64,
+) -> Vec<&'a ChatMessage> {
+    messages
+        .iter()
+        .filter(|m| {
+            if m.is_outgoing
+                || m.kind == crate::message_model::MessageKind::System
+                || !m.unread_policy.counts_unread()
+            {
+                return false;
+            }
+            if m.id.is_empty() || old_ids.contains(&m.id) {
+                return false;
+            }
+            if old_max_ts > 0 && m.ts < old_max_ts {
+                return false;
+            }
+            if seen.is_empty() {
+                old_max_ts > 0 && m.ts > old_max_ts
+            } else {
+                crate::unread::compare_ids(&m.id, seen) == Some(std::cmp::Ordering::Greater)
+            }
+        })
+        .collect()
+}
+
 /// Count incoming messages newer than each thread's read-point.
 ///
 /// Threads without a read-point, and message ids that cannot be ordered against it,
@@ -5856,6 +5986,70 @@ mod tests {
     fn unread_rebuild_skips_threads_without_read_point() {
         let thread = unread_fixture(None, &[("101", false)]);
         assert!(super::unread_counts_from_read_points(&[thread]).is_empty());
+    }
+
+    #[test]
+    fn collect_fresh_incoming_unread_filters_read_backfill_and_non_numeric() {
+        let mut old_ids = std::collections::HashSet::new();
+        old_ids.insert("199".to_string());
+        let msgs = vec![
+            crate::chat::ChatMessage {
+                id: "190".into(),
+                is_outgoing: false,
+                ts: 900,
+                ..Default::default()
+            },
+            crate::chat::ChatMessage {
+                id: "199".into(),
+                is_outgoing: false,
+                ts: 1000,
+                ..Default::default()
+            },
+            crate::chat::ChatMessage {
+                id: "200".into(),
+                is_outgoing: false,
+                ts: 1000,
+                ..Default::default()
+            },
+            crate::chat::ChatMessage {
+                id: "msg_1050".into(),
+                is_outgoing: false,
+                ts: 1050,
+                ..Default::default()
+            },
+            crate::chat::ChatMessage {
+                id: "205".into(),
+                is_outgoing: false,
+                ts: 950, // backfilled older ts than old_max_ts=1000
+                ..Default::default()
+            },
+            crate::chat::ChatMessage {
+                id: "210".into(),
+                is_outgoing: true,
+                ts: 1100,
+                ..Default::default()
+            },
+            crate::chat::ChatMessage {
+                id: "215".into(),
+                is_outgoing: false,
+                ts: 1150,
+                ..Default::default()
+            },
+        ];
+        let fresh = super::collect_fresh_incoming_unread(&msgs, "200", &old_ids, 1000);
+        let ids: Vec<&str> = fresh.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["215"]);
+
+        let mut thread = unread_fixture(Some("200"), &[("199", false), ("215", false)]);
+        thread.messages.push(crate::chat::ChatMessage {
+            id: "out_1234".into(),
+            is_outgoing: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            super::advance_thread_read_point(&mut thread).as_deref(),
+            Some("215")
+        );
     }
 
     #[test]

@@ -2189,11 +2189,14 @@ impl ZaloGuiApp {
                         };
                         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
                     }
-                    // Lưu read-point để mở app lại không đếm lại (#119).
+                    // Lưu read-point để mở app lại không đếm lại (#119, #146).
                     if let Some(t) = self.threads.get_mut(resolved_idx) {
-                        if let Some(last) = t.messages.last() {
-                            let mid = last.id.clone();
-                            t.unread.last_seen_id = Some(mid.clone());
+                        for m in &t.messages {
+                            if !m.id.is_empty() {
+                                self.notified_msg_ids.insert(m.id.clone());
+                            }
+                        }
+                        if let Some(mid) = crate::gui::advance_thread_read_point(t) {
                             let tid_c = tid.clone();
                             let uin_c = self.user_uin.clone();
                             std::thread::spawn(move || {

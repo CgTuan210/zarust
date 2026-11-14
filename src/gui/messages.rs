@@ -4,6 +4,14 @@ use super::*;
 // Chat Bubble & Sticker Widget Rendering
 // ---------------------------------------------------------------------------
 
+pub(super) fn strip_recall_prefix(s: &str) -> &str {
+    let trimmed = s.trim();
+    trimmed
+        .strip_prefix("[Đã thu hồi]")
+        .map(str::trim)
+        .unwrap_or(trimmed)
+}
+
 pub(super) fn is_sticker_message(msg: &ChatMessage) -> Option<(u64, u64)> {
     if let Some(sid) = msg.sticker_id {
         if sid > 0 {
@@ -28,7 +36,7 @@ pub(super) fn is_sticker_message(msg: &ChatMessage) -> Option<(u64, u64)> {
     {
         return Some(hit);
     }
-    if msg.text.trim() == "[Nhãn dán]" {
+    if strip_recall_prefix(&msg.text) == "[Nhãn dán]" {
         return Some((18009, 10130));
     }
     None
@@ -2262,10 +2270,11 @@ pub(super) fn render_message_body(
     }
     // Classified File / Video / Voice / Doc Attachment Card (#74 follow-up)
     if let Some(kind) = classify_attachment(msg) {
+        let clean_text = strip_recall_prefix(trimmed_text);
         let url_str = msg.link_url.as_deref().unwrap_or_default();
         let resolved_file_name = crate::chat::resolve_attachment_file_name(
             msg.link_title.as_deref(),
-            trimmed_text,
+            clean_text,
             url_str,
         );
         return render_attachment_card(
@@ -2286,8 +2295,9 @@ pub(super) fn render_message_body(
     }
 
     // Compact structured cards for Location, Contact, Poll/Vote, and Album messages.
+    let card_text = strip_recall_prefix(trimmed_text);
     if msg.kind == crate::message_model::MessageKind::Location
-        || trimmed_text.starts_with("[Vị trí]")
+        || card_text.starts_with("[Vị trí]")
     {
         egui::Frame::none()
             .fill(pal.bg_elevated)
@@ -2302,7 +2312,7 @@ pub(super) fn render_message_body(
                         .color(text_col)
                         .strong(),
                 );
-                let detail = trimmed_text.strip_prefix("[Vị trí]").unwrap_or(trimmed_text).trim();
+                let detail = card_text.strip_prefix("[Vị trí]").unwrap_or(card_text).trim();
                 if !detail.is_empty() {
                     ui.add(egui::Label::new(RichText::new(detail).size(12.2).color(meta_col)).wrap());
                 }
@@ -2310,7 +2320,7 @@ pub(super) fn render_message_body(
         return None;
     }
     if msg.kind == crate::message_model::MessageKind::Contact
-        || trimmed_text.starts_with("[Danh thiếp]")
+        || card_text.starts_with("[Danh thiếp]")
     {
         egui::Frame::none()
             .fill(pal.bg_elevated)
@@ -2325,9 +2335,9 @@ pub(super) fn render_message_body(
                         .color(text_col)
                         .strong(),
                 );
-                let detail = trimmed_text
+                let detail = card_text
                     .strip_prefix("[Danh thiếp]")
-                    .unwrap_or(trimmed_text)
+                    .unwrap_or(card_text)
                     .trim();
                 if !detail.is_empty() {
                     ui.add(egui::Label::new(RichText::new(detail).size(12.2).color(meta_col)).wrap());
@@ -2335,19 +2345,19 @@ pub(super) fn render_message_body(
             });
         return None;
     }
-    if trimmed_text.starts_with("[Khảo sát]")
-        || trimmed_text.starts_with("[Bình chọn]")
-        || trimmed_text.starts_with("[Album]")
+    if card_text.starts_with("[Khảo sát]")
+        || card_text.starts_with("[Bình chọn]")
+        || card_text.starts_with("[Album]")
     {
-        let title_tag = if trimmed_text.starts_with("[Album]") {
+        let title_tag = if card_text.starts_with("[Album]") {
             format!("{} Album ảnh", lucide::IMAGE)
         } else {
             "📊 Bình chọn nhóm".to_string()
         };
-        let rest = trimmed_text
+        let rest = card_text
             .split_once(']')
             .map(|(_, r)| r.trim())
-            .unwrap_or(trimmed_text);
+            .unwrap_or(card_text);
         egui::Frame::none()
             .fill(pal.bg_elevated)
             .stroke(Stroke::new(1.0_f32, pal.border))
@@ -2537,7 +2547,7 @@ pub(super) fn classify_attachment(msg: &crate::chat::ChatMessage) -> Option<Atta
     if !is_zalo_file_or_video_message(msg) {
         return None;
     }
-    let trimmed = msg.text.trim();
+    let trimmed = strip_recall_prefix(&msg.text);
     let is_video = msg.kind == crate::message_model::MessageKind::Video
         || msg.link_src.as_deref() == Some("Video Zalo")
         || trimmed.starts_with("[Video]")
@@ -3203,7 +3213,7 @@ fn format_duration_mmss(secs: Option<u64>) -> String {
 
 
 pub(super) fn is_zalo_file_or_video_message(msg: &ChatMessage) -> bool {
-    let trimmed = msg.text.trim();
+    let trimmed = strip_recall_prefix(&msg.text);
     msg.kind == crate::message_model::MessageKind::Video
         || msg.kind == crate::message_model::MessageKind::File
         || matches!(
@@ -3233,7 +3243,7 @@ pub(super) fn photo_primary_url(msg: &ChatMessage) -> Option<&str> {
     {
         return Some(lu);
     }
-    let t = msg.text.trim();
+    let t = strip_recall_prefix(&msg.text);
     if crate::chat::is_zalo_photo_cdn_url(t) {
         return Some(t);
     }
@@ -3255,7 +3265,7 @@ pub(super) fn is_zalo_photo_message(msg: &ChatMessage) -> bool {
     }
     // msgType photo là authoritative (#118): server đã bảo đây là ảnh thì render
     // ảnh, kể cả khi link_url lạ/không thuộc allowlist CDN (host mới, renewmedia).
-    let trimmed = msg.text.trim();
+    let trimmed = strip_recall_prefix(&msg.text);
     if msg.link_src.as_deref() == Some("Hình ảnh Zalo")
         || trimmed == "[Hình ảnh]"
         || trimmed.starts_with("[Hình ảnh] ")
@@ -3275,7 +3285,6 @@ pub(super) fn is_zalo_photo_message(msg: &ChatMessage) -> bool {
             }
         }
     }
-    let trimmed = msg.text.trim();
     msg.link_src.as_deref() == Some("Hình ảnh Zalo")
         || trimmed == "[Hình ảnh]"
         || trimmed.starts_with("[Hình ảnh] ")
