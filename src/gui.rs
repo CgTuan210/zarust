@@ -4078,12 +4078,24 @@ impl ZaloGuiApp {
                     errors,
                     cancelled,
                 } => {
-                    let head = if cancelled {
-                        "Đã dừng đồng bộ"
+                    let mut msg = if !cancelled && added == 0 && errors.is_empty() {
+                        let total_have: usize = self
+                            .threads
+                            .iter()
+                            .filter(|t| t.is_group || t.name.contains("Cloud của tôi"))
+                            .map(|t| t.messages.len())
+                            .sum();
+                        format!(
+                            "Đồng bộ xong: đã có đầy đủ {total_have} tin nhắn Nhóm/Cloud mới nhất (0 tin cũ hơn trên máy chủ)"
+                        )
                     } else {
-                        "Đồng bộ xong"
+                        let head = if cancelled {
+                            "Đã dừng đồng bộ"
+                        } else {
+                            "Đồng bộ xong"
+                        };
+                        format!("{head}: lưu thêm {added} tin cũ")
                     };
-                    let mut msg = format!("{head}: lưu thêm {added} tin cũ");
                     if let Some(first) = errors.first() {
                         msg.push_str(&format!(" · {} lỗi (vd. {first})", errors.len()));
                     }

@@ -5775,6 +5775,42 @@ pub async fn get_cloud_messages(
     Ok(dec)
 }
 
+/// Extract `(has_more, is_old, last_msg_id)` from a `/api/cm/getrecentv2` or `/api/cm/getoldv2` response.
+pub fn parse_cloud_page_meta(resp: &Value) -> (bool, bool, Option<String>) {
+    let data_node = resp
+        .pointer("/data/data")
+        .filter(|v| v.is_object())
+        .or_else(|| resp.get("data").filter(|v| v.is_object()))
+        .unwrap_or(resp);
+    let has_more = data_node
+        .get("hasMore")
+        .and_then(|v| v.as_i64().or_else(|| v.as_bool().map(i64::from)))
+        .unwrap_or(0)
+        != 0;
+    let is_old = data_node
+        .get("isOld")
+        .and_then(|v| v.as_i64().or_else(|| v.as_bool().map(i64::from)))
+        .unwrap_or(0)
+        != 0;
+    let last_msg_id = data_node
+        .get("lastMsgId")
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+        })
+        .filter(|s| !s.is_empty() && s != "0" && s.bytes().all(|b| b.is_ascii_digit()));
+    (has_more, is_old, last_msg_id)
+}
+
+/// True when Zalo's cloud message endpoint returns `error_code = -69` (`STOP_RETRY`),
+/// indicating there are no further older pages to fetch for this conversation.
+pub fn is_cloud_stop_retry(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<crate::session::SessionError>()
+        .map(|se| se.code == -69)
+        .unwrap_or(false)
+}
+
 /// Call Zalo's native HTTP long-polling message endpoint (`getChatFromPolling`, cmd `99100`).
 ///
 /// Uses a 12-second timeout matching `lp_chat` long-polling windows (`sync-v2-sub-worker.js:3498030`).
@@ -5892,8 +5928,15 @@ pub async fn poll_new_messages(
     resolve_thread_names(s, threads).await;
     threads.retain(|t| !t.messages.is_empty() || !t.name.starts_with("Người dùng "));
     deduplicate_threads(threads, None);
-    if let Ok(mut store) = crate::store::MessageStore::open("zalo_history.db") {
+    let uin = s.login.as_ref().map(|l| l.uin.as_str()).unwrap_or_default();
+    let acc_db = crate::store::db_path_for_account(uin);
+    if let Ok(mut store) = crate::store::MessageStore::open(&acc_db) {
         let _ = crate::store::persist_threads(&mut store, threads);
+    }
+    if acc_db != "zalo_history.db" {
+        if let Ok(mut store) = crate::store::MessageStore::open("zalo_history.db") {
+            let _ = crate::store::persist_threads(&mut store, threads);
+        }
     }
     save_threads_cache(threads);
     Ok(())
@@ -11135,5 +11178,38 @@ mod send_identity_tests {
         };
         merge_thread_into(&mut target, older, false);
         assert_eq!(target.unread.last_seen_id.as_deref(), Some("250"));
+    }
+
+    #[test]
+    fn parse_cloud_page_meta_and_stop_retry_handle_nested_and_top_level_shapes() {
+        let nested = json!({
+            "error_code": 0,
+            "data": {
+                "data": {
+                    "hasMore": 1,
+                    "isOld": 1,
+                    "lastMsgId": "8398973008356"
+                }
+            }
+        });
+        assert_eq!(
+            parse_cloud_page_meta(&nested),
+            (true, true, Some("8398973008356".into()))
+        );
+
+        let done = json!({
+            "data": {
+                "hasMore": 0,
+                "isOld": 0,
+                "lastMsgId": "0"
+            }
+        });
+        assert_eq!(parse_cloud_page_meta(&done), (false, false, None));
+
+        let err_stop: anyhow::Error = crate::session::SessionError::new(-69, "Stop retry").into();
+        assert!(is_cloud_stop_retry(&err_stop));
+
+        let err_other: anyhow::Error = crate::session::SessionError::new(114, "Other").into();
+        assert!(!is_cloud_stop_retry(&err_other));
     }
 }

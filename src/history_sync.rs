@@ -32,38 +32,108 @@ pub static PHONE_SYNC_CANCEL: AtomicBool = AtomicBool::new(false);
 /// True while a phone message sync (`sync_phone_messages`) is active (#68).
 pub static PHONE_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 
+async fn persist_thread_snapshot(db_path: &str, snapshot: Thread) -> Result<usize> {
+    let acc_db = db_path.to_string();
+    tokio::task::spawn_blocking(move || {
+        let n = store::persist_threads(
+            &mut MessageStore::open(&acc_db)?,
+            std::slice::from_ref(&snapshot),
+        )?;
+        if acc_db != DB_PATH {
+            if let Ok(mut fallback) = MessageStore::open(DB_PATH) {
+                let _ = store::persist_threads(&mut fallback, std::slice::from_ref(&snapshot));
+            }
+        }
+        Ok(n)
+    })
+    .await?
+}
+
 /// Fetch older pages for `t` until the server has nothing older, `MAX_PAGES` is hit, or the user
 /// cancels. Each page is committed immediately so a crash or cancel loses nothing. SQLite work
 /// runs on the blocking pool; no connection is held across an await.
 /// Returns how many messages were new to the database.
 pub async fn sync_thread(s: &Session, t: &mut Thread) -> Result<usize> {
     let id = t.id.clone();
-    let mut cursor =
-        tokio::task::spawn_blocking(move || MessageStore::open(DB_PATH).ok()?.oldest_msg_id(&id))
-            .await?
-            .unwrap_or_default();
+    let uin = s
+        .login
+        .as_ref()
+        .map(|l| l.uin.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let db_path = store::db_path_for_account(&uin);
+
+    let db_for_load = db_path.clone();
+    let id_for_load = id.clone();
+    let mut loaded_vec = vec![t.clone()];
+    let (loaded_thread, oldest_db) = tokio::task::spawn_blocking(move || {
+        store::load_history_into_threads(&db_for_load, &mut loaded_vec, 1000);
+        let oldest = MessageStore::open(&db_for_load)
+            .ok()
+            .and_then(|st| st.oldest_msg_id(&id_for_load));
+        let loaded = loaded_vec.into_iter().next().unwrap_or_default();
+        (loaded, oldest)
+    })
+    .await?;
+    *t = loaded_thread;
+
     let mut added = 0;
+    let mut is_old = false;
+    let mut cursor = oldest_db.unwrap_or_default();
+
+    if t.messages.is_empty() {
+        let resp = match chat::get_cloud_messages(s, &t.id, "0", false, PAGE).await {
+            Ok(r) => r,
+            Err(e) if chat::is_cloud_stop_retry(&e) => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let before = t.messages.len();
+        chat::merge_group_history(t, &resp);
+        if t.messages.len() > before {
+            added += persist_thread_snapshot(&db_path, t.clone()).await?;
+        }
+        let (has_more, next_is_old, resp_cursor) = chat::parse_cloud_page_meta(&resp);
+        if !has_more {
+            return Ok(added);
+        }
+        is_old = next_is_old;
+        match resp_cursor.or_else(|| next_cursor(t, "")) {
+            Some(c) => cursor = c,
+            None => return Ok(added),
+        }
+        tokio::time::sleep(PAUSE).await;
+    } else if cursor.is_empty() {
+        cursor = next_cursor(t, "").unwrap_or_else(|| "0".to_string());
+    }
+
     for _ in 0..MAX_PAGES {
         if CANCEL.load(Ordering::Relaxed) {
             break;
         }
-        let resp = chat::get_cloud_messages(s, &t.id, &cursor, true, PAGE).await?;
+        let resp = match chat::get_cloud_messages(s, &t.id, &cursor, is_old, PAGE).await {
+            Ok(r) => r,
+            Err(e) if chat::is_cloud_stop_retry(&e) => break,
+            Err(e) => return Err(e),
+        };
+        let (has_more, next_is_old, resp_cursor) = chat::parse_cloud_page_meta(&resp);
         let before = t.messages.len();
         chat::merge_group_history(t, &resp);
-        if t.messages.len() == before {
-            break; // nothing older on the server
+        if t.messages.len() > before {
+            added += persist_thread_snapshot(&db_path, t.clone()).await?;
         }
-        let snapshot = t.clone();
-        added += tokio::task::spawn_blocking(move || {
-            store::persist_threads(
-                &mut MessageStore::open(DB_PATH)?,
-                std::slice::from_ref(&snapshot),
-            )
-        })
-        .await??;
-        match next_cursor(t, &cursor) {
-            Some(c) => cursor = c,
-            None => break,
+        if t.messages.len() == before && !is_old && next_is_old && has_more {
+            // Server signaled cold-storage pagination (`isOld = 1`) for this cursor; retry page once via getoldv2.
+            is_old = true;
+            tokio::time::sleep(PAUSE).await;
+            continue;
+        }
+        is_old = next_is_old;
+        if !has_more || t.messages.len() == before {
+            break;
+        }
+        match resp_cursor.or_else(|| next_cursor(t, &cursor)) {
+            Some(c) if c != cursor => cursor = c,
+            _ => break,
         }
         tokio::time::sleep(PAUSE).await;
     }
@@ -517,10 +587,15 @@ where
         );
         if let Ok(cm_resp) = chat::get_cloud_messages(s, &tid, "0", false, PAGE).await {
             chat::merge_group_history(&mut threads[tidx], &cm_resp);
-        }
-        if let Some(oldest) = next_cursor(&threads[tidx], "") {
-            if let Ok(old_resp) = chat::get_cloud_messages(s, &tid, &oldest, true, PAGE).await {
-                chat::merge_group_history(&mut threads[tidx], &old_resp);
+            let (has_more, is_old, last_msg_id) = chat::parse_cloud_page_meta(&cm_resp);
+            if has_more {
+                if let Some(oldest) = last_msg_id.or_else(|| next_cursor(&threads[tidx], "")) {
+                    if let Ok(old_resp) =
+                        chat::get_cloud_messages(s, &tid, &oldest, is_old, PAGE).await
+                    {
+                        chat::merge_group_history(&mut threads[tidx], &old_resp);
+                    }
+                }
             }
         }
         tokio::time::sleep(Duration::from_millis(150)).await;

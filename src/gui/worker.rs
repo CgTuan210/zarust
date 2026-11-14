@@ -2409,9 +2409,16 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
                                 let s = session_clone.lock().await.clone();
+                                let uin = s
+                                    .login
+                                    .as_ref()
+                                    .map(|l| l.uin.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
                                 let total = threads.len();
                                 let mut added = 0;
                                 let mut errors = Vec::new();
+                                let mut synced_threads = Vec::with_capacity(total);
                                 for (i, (id, name, is_group)) in threads.into_iter().enumerate() {
                                     if crate::history_sync::CANCEL.load(Ordering::Relaxed) {
                                         break;
@@ -2432,9 +2439,38 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         ..Default::default()
                                     };
                                     match crate::history_sync::sync_thread(&s, &mut t).await {
-                                        Ok(n) => added += n,
+                                        Ok(n) => {
+                                            added += n;
+                                            if !t.messages.is_empty() {
+                                                synced_threads.push(t);
+                                            }
+                                        }
                                         Err(e) => errors.push(format!("{}: {e}", t.name)),
                                     }
+                                }
+                                let db_path = crate::store::db_path_for_account(&uin);
+                                if let Ok(updated_threads) = tokio::task::spawn_blocking(move || {
+                                    let mut updated_threads = crate::chat::load_threads_cache();
+                                    crate::store::load_history_into_threads(
+                                        &db_path,
+                                        &mut updated_threads,
+                                        crate::store::MessageStore::PRELOAD_MSGS,
+                                    );
+                                    for synced in synced_threads {
+                                        if let Some(existing) =
+                                            updated_threads.iter_mut().find(|x| x.id == synced.id)
+                                        {
+                                            crate::chat::merge_thread_into(existing, synced, false);
+                                        } else {
+                                            updated_threads.push(synced);
+                                        }
+                                    }
+                                    crate::chat::save_threads_cache(&updated_threads);
+                                    updated_threads
+                                })
+                                .await
+                                {
+                                    let _ = gui_tx_clone.send(GuiEvent::ThreadsUpdated(updated_threads));
                                 }
                                 let _ = gui_tx_clone.send(GuiEvent::SyncFinished {
                                     added,
@@ -2508,6 +2544,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         }
                                     }
                                     if is_group || is_send2me {
+                                        let (mut has_more, mut is_old, mut server_cursor) =
+                                            (false, false, None);
                                         if let Ok(cm_resp) = crate::chat::get_cloud_messages(
                                             &s,
                                             &group_id,
@@ -2518,60 +2556,54 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         .await
                                         {
                                             crate::chat::merge_group_history(&mut t, &cm_resp);
+                                            (has_more, is_old, server_cursor) =
+                                                crate::chat::parse_cloud_page_meta(&cm_resp);
                                         }
-                                        // Backfill up to 5 pages (250 messages) of older cloud history
-                                        let mut cursor_id = t
-                                            .messages
-                                            .first()
-                                            .map(|m| m.id.as_str())
-                                            .filter(|id| {
-                                                !id.is_empty()
-                                                    && id.chars().all(|c| c.is_ascii_digit())
-                                            })
-                                            .unwrap_or("9223372036854775808")
-                                            .to_string();
-                                        for page in 1..=5 {
-                                            let prev_len = t.messages.len();
-                                            let Ok(cm_old) = crate::chat::get_cloud_messages(
-                                                &s,
-                                                &group_id,
-                                                &cursor_id,
-                                                true,
-                                                50,
-                                            )
-                                            .await
-                                            else {
-                                                break;
-                                            };
-                                            crate::chat::merge_group_history(&mut t, &cm_old);
-                                            let new_len = t.messages.len();
-                                            let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
-                                                format!(
-                                                    "⏳ Đang đồng bộ lịch sử cũ (trang {page}/5 — {new_len} tin nhắn)…"
-                                                ),
-                                            ));
-                                            ctx_clone.request_repaint();
-                                            let data_node = cm_old
-                                                .pointer("/data/data")
-                                                .or_else(|| cm_old.get("data"))
-                                                .unwrap_or(&cm_old);
-                                            let has_more = data_node
-                                                .get("hasMore")
-                                                .and_then(|v| v.as_i64())
-                                                .unwrap_or(0);
-                                            let next_cursor = data_node
-                                                .get("lastMsgId")
-                                                .and_then(|v| {
-                                                    v.as_str().map(str::to_string).or_else(|| {
-                                                        v.as_u64().map(|n| n.to_string())
-                                                    })
+                                        if has_more {
+                                            // Backfill up to 5 pages (250 messages) of older cloud history
+                                            let mut cursor_id = t
+                                                .messages
+                                                .first()
+                                                .map(|m| m.id.clone())
+                                                .filter(|id| {
+                                                    !id.is_empty()
+                                                        && id.chars().all(|c| c.is_ascii_digit())
                                                 })
-                                                .filter(|s| {
-                                                    !s.is_empty()
-                                                        && s != "0"
-                                                        && s.chars().all(|c| c.is_ascii_digit())
-                                                })
-                                                .or_else(|| {
+                                                .or(server_cursor)
+                                                .unwrap_or_else(|| "9223372036854775808".to_string());
+                                            for page in 1..=5 {
+                                                let prev_len = t.messages.len();
+                                                let Ok(cm_old) = crate::chat::get_cloud_messages(
+                                                    &s,
+                                                    &group_id,
+                                                    &cursor_id,
+                                                    is_old,
+                                                    50,
+                                                )
+                                                .await
+                                                else {
+                                                    break;
+                                                };
+                                                crate::chat::merge_group_history(&mut t, &cm_old);
+                                                let new_len = t.messages.len();
+                                                let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
+                                                    format!(
+                                                        "⏳ Đang đồng bộ lịch sử cũ (trang {page}/5 — {new_len} tin nhắn)…"
+                                                    ),
+                                                ));
+                                                ctx_clone.request_repaint();
+                                                let (more_after, next_is_old, resp_cursor) =
+                                                    crate::chat::parse_cloud_page_meta(&cm_old);
+                                                if new_len == prev_len
+                                                    && !is_old
+                                                    && next_is_old
+                                                    && more_after
+                                                {
+                                                    is_old = true;
+                                                    continue;
+                                                }
+                                                is_old = next_is_old;
+                                                let next_cursor = resp_cursor.or_else(|| {
                                                     t.messages
                                                         .first()
                                                         .map(|m| m.id.clone())
@@ -2582,13 +2614,17 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                     .all(|c| c.is_ascii_digit())
                                                         })
                                                 });
-                                            let Some(nc) = next_cursor else {
-                                                break;
-                                            };
-                                            if has_more == 0 || nc == cursor_id || new_len == prev_len {
-                                                break;
+                                                let Some(nc) = next_cursor else {
+                                                    break;
+                                                };
+                                                if !more_after
+                                                    || nc == cursor_id
+                                                    || new_len == prev_len
+                                                {
+                                                    break;
+                                                }
+                                                cursor_id = nc;
                                             }
-                                            cursor_id = nc;
                                         }
                                     }
                                     if is_group
