@@ -299,14 +299,14 @@ Dự án ghi nhận các thành viên có đóng góp mã nguồn tiêu biểu t
 
 | Contributor | GitHub | Đóng góp chính | Khối lượng |
 | :--- | :--- | :--- | :---: |
-| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Kiến trúc lõi, VoIP call engine, egui framework, Danh bạ & Nhật ký Social, đa nền tảng & phát hành v0.0.6 | **> 75,600+ lines** |
-| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Kiến trúc GUI modular, Atom One Dark, MCP/REST API, Hẹn giờ tin nhắn, Auto-Update GitHub API, xử lý 20+ Issues & phát hành v0.0.5 | **> 35,100+ lines** 🏆 |
+| **TIPC1110** | [@TIPC1110](https://github.com/TIPC1110) | Kiến trúc lõi, VoIP call engine, egui framework, Danh bạ & Nhật ký Social, đa nền tảng & phát hành v0.0.6 – v0.1.2 | **> 75,600+ lines** |
+| **Đỗ Trung Thành (thanhdo1110)** | [@thanhdo1110](https://github.com/thanhdo1110) | Kiến trúc GUI modular, Atom One Dark, MCP/REST API, Hẹn giờ tin nhắn, Auto-Update GitHub API, xử lý 20+ Issues & đồng phát hành v0.0.5 – v0.1.2 | **> 35,100+ lines** 🏆 |
 | **Thuong Tin** | [@thuongtin](https://github.com/thuongtin) | Loạt 10 PRs: Múi giờ OS, tùy biến data-dir, helpers macOS, session atomic, media cache, updater, message state, định danh tin nhắn (#61), điều hướng trích dẫn (#60), quyền thông báo macOS (#59) | **> 11,500+ lines** 🏆 |
 | **ngxccc** | [@ngxccc](https://github.com/ngxccc) | Loạt 5 PRs: Tiêu chuẩn kỹ thuật, bảo toàn session an toàn, phân giải domain mạng | **> 3,400+ lines** |
 | **GrootTheDeveloper** | [@GrootTheDeveloper](https://github.com/GrootTheDeveloper) | Loạt 8 PRs: Tối ưu khởi động SQLite, đồng bộ lịch sử nhóm/Cloud (#45), poll timer worker (#46), virtualization chat, lazy load Font CJK | **~950+ lines** |
-| **Tuyến Trần (gr219)** | [@gr219](https://github.com/gr219) | PR #85 (chờ sự kiện file_done), PR #99 (sửa lỗi spawn helper ETXTBSY), PR #125 (hiển thị biệt danh bạn bè), PR #145 (nạp trực tiếp Sync V2 WASM từ Zalo PC app.asar, khắc phục #147) | **~900+ lines** |
+| **Tuyến Trần (gr219)** | [@gr219](https://github.com/gr219) | PR #85 (chờ sự kiện file_done), PR #99 (sửa lỗi spawn helper ETXTBSY), PR #125 (hiển thị biệt danh bạn bè), PR #127 (đính kèm nhiều tệp & album ảnh dạng lưới), PR #145 (nạp trực tiếp Sync V2 WASM từ Zalo PC app.asar, khắc phục #147) | **> 1,400+ lines** 🏆 |
 | **Leoaxo098** | [@Leoaxo098](https://github.com/Leoaxo098) | PR #97: Khóa ô nhập liệu khi thành viên bị hạn chế quyền chat trong nhóm | **~180+ lines** |
-| **hoanglong149** | [@hoanglong149](https://github.com/hoanglong149) | PR #78, PR #121 & PR #136: Giải mã Sync v2 di động qua WASM, chống thu hồi (#79, #141), thông báo OS, tin nhắn tự hủy, thoại & tối ưu CPU/RAM khi chờ (#135) | **> 1,300+ lines** |
+| **hoanglong149** | [@hoanglong149](https://github.com/hoanglong149) | PR #78, #121, #136, #137, #143, #144: Giải mã Sync v2 WASM, chống thu hồi (#79, #141), thông báo OS, tối ưu CPU/RAM (#135), Console TUI + LLM Agent + cầu nối Telegram ↔ Zalo | **> 3,500+ lines** 🏆 |
 | **Đỗ Mạnh Cường (cuongdm75)** | [@cuongdm75](https://github.com/cuongdm75) | PR #105 & PR #134: Chọn thư mục tải về native, tùy chỉnh UI trực tiếp, trả lời trích dẫn (quote-reply), chuyển tiếp tin nhắn & bảo toàn URL thẻ liên kết (#88, #89) | **> 8,500+ lines** 🏆 |
 | **Trần Đức Thịnh (Fin12n)** | [@Fin12n](https://github.com/Fin12n) | PR #132 & PR #148: Thiết kế lại thẻ tập tin (file cards), sửa phát video trực tiếp, tinh chỉnh UI/UX toàn diện & giải mã Sync V2 protobuf | **> 6,500+ lines** 🏆 |
 | **Nguyễn Văn Trãi (TraiNguyenVan)** | [@TraiNguyenVan](https://github.com/TraiNguyenVan) | PR #93: Khôi phục sự kiện bộ gõ tiếng Việt IME composition trên Linux (X11/Wayland) (#86, #101, #112) | **> 2,600+ lines** |
@@ -314,7 +314,7 @@ Dự án ghi nhận các thành viên có đóng góp mã nguồn tiêu biểu t
 > *Ghi chú: Toàn bộ danh sách vinh danh mọi cá nhân đóng góp (báo lỗi, đề xuất tính năng, pull request) được cập nhật công khai tại trang [Người đóng góp](https://ctdozlite.ctdo.net/contributors.html).*
 
 <details>
-<summary><b>👉 Nhấn vào đây để xem toàn bộ danh sách 105 người đóng góp (Community & GitHub)</b></summary>
+<summary><b>👉 Nhấn vào đây để xem toàn bộ danh sách 117 người đóng góp (Community & GitHub)</b></summary>
 
 | # | Người đóng góp | Hạng mục | Đóng góp chi tiết |
 | :---: | :--- | :--- | :--- |
@@ -423,6 +423,18 @@ Dự án ghi nhận các thành viên có đóng góp mã nguồn tiêu biểu t
 | 102 | **@Harry-Huy** | `GitHub Issue` | Issue #67: Báo cáo lỗi trạng thái tắt thông báo (mute/unmute) chưa đồng bộ với Zalo PC chính thức. |
 | 103 | **@lhbkhanh801-a11y** | `GitHub Issue` | Issue #64: Đề xuất bổ sung cấu hình Proxy để sử dụng nhiều tài khoản Zalo trên PC. |
 | 104 | **@Kesitinh13524 & @luuquangduy-tech** | `GitHub Issue` | Issue #147: Tham gia phản hồi, cung cấp ảnh chụp màn hình và kiểm chứng lỗi đồng bộ tin nhắn từ điện thoại & Cloud. |
+| 105 | **@ziq3** | `GitHub PR (#154)` | PR #154: Khắc phục tình trạng phát lại thông báo reaction cũ mỗi lần mở lại ứng dụng. |
+| 106 | **@bqqhuy** | `GitHub PR (#92)` | PR #92: Kiểm tra định dạng Windows clipboard DIB layouts khi dán ảnh từ clipboard. |
+| 107 | **@zt-hky** | `GitHub PR (#90)` | PR #90: Hỗ trợ dán ảnh clipboard vào khung soạn tin trên macOS. |
+| 108 | **@esvm4** | `GitHub PR (#65)` | PR #65: Thêm tùy chọn thu nhỏ xuống khay hệ thống (close-to-tray) trên Linux. |
+| 109 | **@cypherdo37** | `GitHub PRs (#37, #39)` | PR #37, #39: Đề xuất tích hợp bot kiểm tra chất lượng PR tự động trong CI. |
+| 110 | **@quangthoai1985** | `GitHub PRs (#69, #70)` | PR #69, #70: Đóng góp nghiên cứu tính năng media & phát hành v0.1.2. |
+| 111 | **@dinhhanh37k14-code** | `GitHub Issue (#138)` | Issue #138: Báo cáo tổng hợp lỗi tag tên, ghim tin, thu hồi và chia sẻ tệp. |
+| 112 | **@ngthzuan** | `GitHub Issue (#123)` | Issue #123: Báo cáo lỗi vỡ layout khung chat trên màn hình nhỏ (responsive). |
+| 113 | **@LKW1989-kw** | `GitHub Issue (#110)` | Issue #110: Đề xuất thêm mã khóa bảo vệ riêng tư cho ứng dụng Zalo. |
+| 114 | **@Subgeneric** | `GitHub Issue (#83)` | Issue #83: Đề xuất hỗ trợ nhập (import) lịch sử chat trực tiếp từ Zalo PC chính thức. |
+| 115 | **@nguyenphuong10102003** | `GitHub Issue (#73)` | Issue #73: Báo cáo lỗi tự động đồng bộ tin nhắn từ điện thoại khi đăng nhập. |
+| 116 | **@bao2222-hub, @NahXD, @dangvusns** | `GitHub Issues (#66, #82, #120)` | Tham gia mở issue báo cáo lỗi và kiểm thử các phiên bản sớm trên GitHub. |
 
 </details>
 
