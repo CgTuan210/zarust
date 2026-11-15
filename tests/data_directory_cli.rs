@@ -151,9 +151,10 @@ fn legacy_cli_keeps_cwd_and_version_does_not_prepare_storage() {
         .output()
         .unwrap();
     assert!(result.status.success());
+    let stdout_path = std::path::PathBuf::from(String::from_utf8_lossy(&result.stdout).trim());
     assert_eq!(
-        String::from_utf8_lossy(&result.stdout).trim(),
-        fixture.0.to_str().unwrap()
+        stdout_path.canonicalize().unwrap_or(stdout_path),
+        fixture.0.canonicalize().unwrap_or_else(|_| fixture.0.clone())
     );
     let data = fixture.0.join("not-created");
     let result = Command::new(env!("CARGO_BIN_EXE_ctdozlite"))

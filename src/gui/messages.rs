@@ -2061,6 +2061,7 @@ pub(super) fn render_message_body(
                     let disp_h = (th_f * scale).clamp(90.0, max_h);
                     let img = egui::Image::new(tex)
                         .fit_to_exact_size(Vec2::new(disp_w, disp_h))
+                        .maintain_aspect_ratio(false)
                         .rounding(Rounding::same(12.0))
                         .sense(Sense::click());
                     let resp = ui
@@ -3420,6 +3421,16 @@ fn album_grid_width(max_text_width: f32) -> f32 {
     max_text_width.min(360.0).floor()
 }
 
+/// Pre-measure exact rendered width of an album grid: sum of tile widths plus gaps.
+pub(super) fn album_rendered_width(count: usize, max_text_width: f32) -> f32 {
+    let cols = album_columns(count);
+    let gap = 3.0_f32;
+    let grid_w = album_grid_width(max_text_width);
+    let tile = ((grid_w - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+    let actual_cols = count.min(cols);
+    (tile * actual_cols as f32 + gap * (actual_cols.saturating_sub(1) as f32)).min(grid_w)
+}
+
 /// Columns for an album grid: pairs and quads read best two-wide, everything else three-wide.
 fn album_columns(count: usize) -> usize {
     match count {
@@ -3496,6 +3507,7 @@ fn render_photo_album_grid(
                             egui::Image::new(tex)
                                 .uv(cover_uv(tw as f32, th as f32))
                                 .fit_to_exact_size(size)
+                                .maintain_aspect_ratio(false)
                                 .rounding(Rounding::same(6.0))
                                 .sense(Sense::click()),
                         )
@@ -3746,7 +3758,7 @@ pub(super) fn render_chat_bubble(
     } else if is_call_card {
         max_text_width.min(256.0)
     } else if is_photo_card && album.len() >= 2 {
-        album_grid_width(max_text_width)
+        album_rendered_width(album.len(), max_text_width)
     } else if is_photo_card {
         let thumb_u = photo_primary_url(msg).unwrap_or("");
         let tkey = format!("thumb_{}", crate::crypto::md5_hex(thumb_u));
@@ -5756,6 +5768,21 @@ mod album_grid_tests {
         assert_eq!((wide.min.y, wide.max.y), (0.0, 1.0));
         let tall = cover_uv(100.0, 400.0);
         assert!((tall.min.y - 0.375).abs() < 1e-6 && (tall.max.y - 0.625).abs() < 1e-6);
+    }
+
+    #[test]
+    fn album_rendered_width_computes_exact_span() {
+        // count = 2 with max_text_width = 500: grid_w = 360, cols = 2, tile = floor((360-3)/2) = 178
+        // span = 178 * 2 + 3 = 359
+        let w = album_rendered_width(2, 500.0);
+        assert_eq!(w, 359.0);
+        // count = 1 with max_text_width = 500: cols = 2, actual_cols = 1, span = 178
+        let w1 = album_rendered_width(1, 500.0);
+        assert_eq!(w1, 178.0);
+        // count = 3 with max_text_width = 300: grid_w = 300, cols = 3, tile = floor((300-6)/3) = 98
+        // span = 98 * 3 + 6 = 300
+        let w3 = album_rendered_width(3, 300.0);
+        assert_eq!(w3, 300.0);
     }
 }
 
