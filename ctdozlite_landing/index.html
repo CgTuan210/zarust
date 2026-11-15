@@ -967,6 +967,69 @@
     font-size: 14px;
   }
 
+  /* ---------- download section ---------- */
+  .dl-grid {
+    margin-top: 36px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .dl-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    padding: 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    transition: border-color 0.2s var(--ease), transform 0.2s var(--ease);
+  }
+
+  .dl-card:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    transform: translateY(-2px);
+  }
+
+  .dl-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .dl-head h3 { font-size: 19px; font-weight: 600; color: var(--text); }
+  .dl-arch {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    padding: 2px 8px;
+    border-radius: var(--radius-chip);
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  .dl-desc { font-size: 13.5px; color: var(--text-2); line-height: 1.5; }
+  .dl-main-btn { width: 100%; justify-content: center; }
+
+  .dl-alts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+
+  .dl-alt {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-2);
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    transition: color 0.16s var(--ease), border-color 0.16s var(--ease);
+  }
+
+  .dl-alt:hover {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    text-decoration: none;
+  }
+
   /* ---------- final cta ---------- */
   .cta { padding: clamp(64px, 8vw, 104px) 0; border-top: 1px solid var(--border); }
 
@@ -1049,7 +1112,7 @@
 
   /* ---------- responsive ---------- */
   @media (max-width: 980px) {
-    .hero-grid, .split, .split.rev, .perf-grid, .bento, .foot-grid {
+    .hero-grid, .split, .split.rev, .perf-grid, .bento, .foot-grid, .dl-grid {
       grid-template-columns: 1fr;
     }
     .bento .wide { grid-column: 1; }
@@ -1092,7 +1155,7 @@
       <a href="#accounts">Đa tài khoản</a>
       <a href="#terminal">Terminal</a>
       <a href="#data">Dữ liệu</a>
-      <a href="#opensource">Mã nguồn</a>
+      <a href="#download">Tải về</a>
       <a href="issues.html">Lỗi cần sửa</a>
       <a href="contributors.html">Đóng góp lỗi</a>
     </nav>
@@ -1100,7 +1163,7 @@
       <button class="theme-toggle" id="themeToggle" type="button" aria-label="Chuyển giao diện sáng tối">
         <b class="t-light">Sáng</b><b class="t-dark">Tối</b>
       </button>
-      <a class="btn btn-primary btn-sm nav-cta-desktop" href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">GitHub</a>
+      <a class="btn btn-primary btn-sm nav-cta-desktop" href="#download">Tải về v0.1.2</a>
       <button class="nav-toggle" id="navToggle" type="button" aria-label="Mở menu" aria-expanded="false" aria-controls="mobileMenu">
         <i aria-hidden="true"></i>
       </button>
@@ -1111,9 +1174,9 @@
     <a href="#accounts">Đa tài khoản</a>
     <a href="#terminal">Terminal</a>
     <a href="#data">Dữ liệu</a>
-    <a href="#opensource">Mã nguồn</a>
+    <a href="#download">Tải về v0.1.2</a>
     <a href="issues.html">Lỗi cần sửa</a>
-      <a href="contributors.html">Đóng góp lỗi</a>
+    <a href="contributors.html">Đóng góp lỗi</a>
     <a href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">GitHub</a>
   </div>
 </header>
@@ -1129,8 +1192,9 @@
           ctdozlite là client desktop mã nguồn mở viết bằng Rust, tối ưu tài nguyên phần cứng, hỗ trợ quản lý nhiều tài khoản song song và lưu trữ dữ liệu hoàn toàn cục bộ trên máy của bạn.
         </p>
         <div class="hero-actions">
-          <a class="btn btn-primary" href="#performance">Khám phá ctdozlite</a>
-          <a class="btn btn-ghost" href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">Xem mã nguồn</a>
+          <a class="btn btn-primary" href="#download">Tải xuống v0.1.2</a>
+          <a class="btn btn-ghost" href="#performance">Khám phá</a>
+          <a class="btn btn-ghost" href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">GitHub</a>
         </div>
       </div>
 
@@ -1455,14 +1519,69 @@
     </div>
   </section>
 
+  <section class="section" id="download">
+    <div class="wrap">
+      <div class="reveal">
+        <div class="eyebrow">Tải xuống · v0.1.2</div>
+        <h2>Cài đặt trực tiếp cho máy của bạn.</h2>
+        <p class="lead">
+          Chọn đúng gói dựng sẵn cho Windows, macOS hoặc Linux. Tất cả bản dựng đều được biên dịch tự động qua GitHub Actions kèm kiểm tra toàn vẹn SHA-256.
+        </p>
+      </div>
+
+      <div class="dl-grid reveal">
+        <div class="dl-card">
+          <div class="dl-head">
+            <h3>Windows</h3>
+            <span class="dl-arch">x86_64</span>
+          </div>
+          <p class="dl-desc">Trình cài đặt chuẩn hoặc bản Portable chạy trực tiếp không cần cài đặt cho Windows 10/11.</p>
+          <a class="btn btn-primary dl-main-btn" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-setup-windows-x86_64.exe" target="_blank" rel="noreferrer">Tải bộ cài (.exe)</a>
+          <div class="dl-alts">
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-portable-windows-x86_64.exe" target="_blank" rel="noreferrer">Portable .exe</a>
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-portable-windows-x86_64.zip" target="_blank" rel="noreferrer">Portable .zip</a>
+          </div>
+        </div>
+
+        <div class="dl-card">
+          <div class="dl-head">
+            <h3>macOS</h3>
+            <span class="dl-arch">arm64 · x86_64</span>
+          </div>
+          <p class="dl-desc">Gói ảnh đĩa .dmg tối ưu cho Apple Silicon (M1–M4), Mac Intel và bản Universal hợp nhất.</p>
+          <a class="btn btn-primary dl-main-btn" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-macos-arm64.dmg" target="_blank" rel="noreferrer">Apple Silicon (.dmg)</a>
+          <div class="dl-alts">
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-macos-x86_64.dmg" target="_blank" rel="noreferrer">Intel x86_64 .dmg</a>
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-macos.dmg" target="_blank" rel="noreferrer">Universal .dmg</a>
+          </div>
+        </div>
+
+        <div class="dl-card">
+          <div class="dl-head">
+            <h3>Linux</h3>
+            <span class="dl-arch">x86_64</span>
+          </div>
+          <p class="dl-desc">Đóng gói đa định dạng cho Ubuntu, Debian, Fedora, Arch và hệ thống glibc 2.31 cũ hơn.</p>
+          <a class="btn btn-primary dl-main-btn" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-x86_64.AppImage" target="_blank" rel="noreferrer">AppImage (Universal)</a>
+          <div class="dl-alts">
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite_0.1.2_amd64.deb" target="_blank" rel="noreferrer">.deb</a>
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-1.x86_64.rpm" target="_blank" rel="noreferrer">.rpm</a>
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite-0.1.2-linux-x86_64.tar.gz" target="_blank" rel="noreferrer">.tar.gz</a>
+            <a class="dl-alt" href="https://github.com/ctdoteam1110/ctdozlite/releases/download/v0.1.2/ctdozlite_0.1.2_legacy_glibc2.31_amd64.deb" target="_blank" rel="noreferrer">Legacy .deb</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section class="cta">
     <div class="wrap">
       <div class="cta-box reveal">
         <h2>Sẵn sàng thử một cách nhẹ hơn?</h2>
-        <p>Clone dự án, build bằng Cargo và đăng nhập bằng mã QR. Không cần cài thêm runtime nào khác.</p>
+        <p>Tải bản dựng sẵn v0.1.2 hoặc clone dự án, build bằng Cargo và đăng nhập bằng mã QR.</p>
         <div class="cta-actions">
-          <a class="btn btn-primary" href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">Xem bản phát hành</a>
-          <a class="btn btn-ghost" href="https://github.com/ctdoteam1110/ctdozlite" target="_blank" rel="noreferrer">Đọc hướng dẫn cài đặt</a>
+          <a class="btn btn-primary" href="https://github.com/ctdoteam1110/ctdozlite/releases/tag/v0.1.2" target="_blank" rel="noreferrer">Xem bản phát hành v0.1.2</a>
+          <a class="btn btn-ghost" href="https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/CAI_DAT.md" target="_blank" rel="noreferrer">Đọc hướng dẫn cài đặt</a>
         </div>
         <div class="cta-meta">cargo run --release -- --gui</div>
       </div>
