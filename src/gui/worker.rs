@@ -121,7 +121,10 @@ pub(super) async fn handle_mobile_sync_controls(
                         "bỏ qua + dọn 591 batch cũ: sync={} type={}",
                         sync_id, batch_type
                     ));
-                    crate::socket::send_sync_ack_delete(&sync_id, "STALE_BATCH_CLEANUP");
+                    crate::socket::send_sync_ack_delete(
+                        &sync_id,
+                        crate::socket::SYNC_DISPOSE_OUTDATED,
+                    );
                     continue;
                 }
 
@@ -201,13 +204,20 @@ pub(super) async fn handle_mobile_sync_controls(
                     .await
                     {
                         Ok(count) => {
+                            let total = crate::history_sync::add_sync_v2_imported_count(count);
                             crate::logger::log_sync(&format!(
-                                "msg OK: sync={} count={}",
-                                sync_id, count
+                                "msg OK: sync={} count={} total={} last={}",
+                                sync_id, count, total, is_last
                             ));
-                            let fin = format!(
-                                "🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!"
-                            );
+                            let fin = if is_last {
+                                format!(
+                                    "🎉 Đã giải mã & đồng bộ thành công {total} tin nhắn từ điện thoại vào ứng dụng!"
+                                )
+                            } else {
+                                format!(
+                                    "📥 Đã giải mã {total} tin nhắn (+{count} tin) — đang chờ gói tin tiếp theo từ iPhone…"
+                                )
+                            };
                             crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
                             let _ = gui_tx.send(GuiEvent::StatusUpdate(fin));
                             let updated = crate::chat::load_threads_cache();
@@ -221,7 +231,80 @@ pub(super) async fn handle_mobile_sync_controls(
                         }
                     }
                     ctx.request_repaint();
+                } else {
+                    crate::logger::log_sync(&format!(
+                        "batch unknown type: sync={} type={} last={}",
+                        sync_id, batch_type, is_last
+                    ));
                 }
+            }
+            crate::chat::MobileSyncControlEvent::SyncV2EmptyDone { sync_id } => {
+                if !sync_id.is_empty()
+                    && crate::history_sync::active_v2_sync_id().as_deref() != Some(sync_id.as_str())
+                {
+                    continue;
+                }
+                crate::logger::log_sync(&format!(
+                    "sync v2 empty done (isLast=1, no url): sync={sync_id}"
+                ));
+                let fin = "🎉 Đã đồng bộ thành công (không có tin nhắn mới cần tải thêm từ điện thoại)!".to_string();
+                crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
+                let _ = gui_tx.send(GuiEvent::StatusUpdate(fin));
+                ctx.request_repaint();
+            }
+            crate::chat::MobileSyncControlEvent::SyncV2MobileIdle { sync_id } => {
+                if !sync_id.is_empty()
+                    && crate::history_sync::active_v2_sync_id().as_deref() != Some(sync_id.as_str())
+                {
+                    continue;
+                }
+                let woke = if !sync_id.is_empty() {
+                    crate::socket::send_mobile_wakeup(&sync_id)
+                } else {
+                    false
+                };
+                crate::logger::log_sync(&format!(
+                    "phone idle (status=2): sync={sync_id} wakeup_592={woke}"
+                ));
+                let note = "📱 Zalo trên iPhone đang tạm nghỉ (nền) — hãy giữ màn hình Zalo trên iPhone mở để tiếp tục gửi tin nhắn…".to_string();
+                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                let _ = gui_tx.send(GuiEvent::StatusUpdate(note));
+                ctx.request_repaint();
+            }
+            crate::chat::MobileSyncControlEvent::SyncV2Error {
+                sync_id,
+                err,
+                message,
+                is_last,
+            } => {
+                if !sync_id.is_empty()
+                    && crate::history_sync::active_v2_sync_id().as_deref() != Some(sync_id.as_str())
+                {
+                    crate::logger::log_sync(&format!(
+                        "bỏ qua SyncV2Error session cũ: sync={sync_id} err={err} last={is_last}"
+                    ));
+                    continue;
+                }
+                crate::logger::log_sync(&format!(
+                    "sync v2 error: sync={sync_id} err={err} last={is_last} msg={message}"
+                ));
+                let total = crate::history_sync::sync_v2_imported_count();
+                let note = if !is_last {
+                    // Cảnh báo cục bộ 1 phân vùng (vd OA `errorCode: 502`, `isLast: 0`):
+                    // không đặt chữ "Lỗi" để tiến trình đồng bộ tiếp tục chờ các batch thật phía sau.
+                    format!(
+                        "⏳ Điện thoại bỏ qua 1 phân vùng (mã {err}) — đang tiếp tục nhận các gói tin còn lại…"
+                    )
+                } else if total > 0 {
+                    format!(
+                        "🎉 Đã giải mã & đồng bộ thành công {total} tin nhắn từ điện thoại vào ứng dụng!"
+                    )
+                } else {
+                    format!("⚠️ Lỗi đồng bộ từ điện thoại (mã {err}): {message}")
+                };
+                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                let _ = gui_tx.send(GuiEvent::StatusUpdate(note));
+                ctx.request_repaint();
             }
         }
     }

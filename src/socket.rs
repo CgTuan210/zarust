@@ -100,10 +100,17 @@ pub fn send_sync_message_ws_request(payload: &Value) -> bool {
     send_ws_frame(CMD_SYNC_REQUEST, 0, 1, Some(&body))
 }
 
+/// Mã lý do giải phóng phiên Sync V2 (`cmd 591`, `app.asar` `DisposeReason` enum).
+pub const SYNC_DISPOSE_USER_CANCEL: u8 = 0;
+pub const SYNC_DISPOSE_SUCCESS: u8 = 1;
+pub const SYNC_DISPOSE_ERROR: u8 = 2;
+pub const SYNC_DISPOSE_OUTDATED: u8 = 3;
+
 /// Emit `SYNC_MESSAGE.ACK_DELETE_SYNC_SESSION` (`cmd 591`, `subCmd 0`).
 /// Zalo PC gửi khi release session (xong/huỷ/lỗi) — server/phone dọn session.
-/// Thiếu 591 khiến session server-side sống mãi, phone kẹt "đang đồng bộ".
-pub fn send_sync_ack_delete(sync_id: &str, reason: &str) -> bool {
+/// Lưu ý: `reason` trên wire BẮT BUỘC là số nguyên `0..=3` (`UserCancel=0`, `SyncSuccess=1`,
+/// `Error=2`, `OutDated=3`), gửi chuỗi sẽ bị server từ chối khiến Zalo Mobile treo "Đang đồng bộ tin nhắn...".
+pub fn send_sync_ack_delete(sync_id: &str, reason: u8) -> bool {
     let req_id = format!("req_591_{}", now_ms());
     let body = json!({
         "reqId": req_id,
@@ -113,7 +120,12 @@ pub fn send_sync_ack_delete(sync_id: &str, reason: &str) -> bool {
             "reason": reason,
         }
     });
-    send_ws_frame(CMD_SYNC_ACK_DELETE, 0, 1, Some(&body))
+    let ok = send_ws_frame(CMD_SYNC_ACK_DELETE, 0, 1, Some(&body));
+    crate::logger::log_sync(&format!(
+        "591 gửi: sync={} reason={} ws_591={ok}",
+        sync_id, reason
+    ));
+    ok
 }
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                   (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36";
@@ -645,8 +657,11 @@ async fn run_once(
                         .await;
                     trace(format!("-> pull next {qkey} {id}"));
                 }
-                // Log response của Sync V2 (590/592) để biết server ack hay từ chối.
-                if cmd == CMD_SYNC_REQUEST || cmd == CMD_SYNC_MOBILE_WAKE_UP {
+                // Log response của Sync V2 (590/591/592) để biết server ack hay từ chối.
+                if cmd == CMD_SYNC_REQUEST
+                    || cmd == CMD_SYNC_ACK_DELETE
+                    || cmd == CMD_SYNC_MOBILE_WAKE_UP
+                {
                     crate::logger::log_sync(&format!("WS về cmd={cmd}: {}", payload.to_string().chars().take(400).collect::<String>()));
                 }
                 if tx.send(WsEvent { cmd, sub_cmd, version, payload }).is_err() {

@@ -8909,7 +8909,7 @@ pub fn build_sync_v2_payload(
 
     let (req_type, queries) = if partitions.is_empty() {
         (
-            "unspecified",
+            "conversation",
             vec![json!({
                 "partition": "",
                 "from": 0,
@@ -8993,71 +8993,173 @@ pub async fn request_phone_sync_v2_http(
     Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
 }
 
-/// Tra cứu danh sách partition (`oneone/<noised_id>` và `group/<noised_id>`) qua `/api/znoise`.
+/// Tra cứu danh sách partition (`oneone/<globalId>` và `group/<globalId>`) đúng chuẩn Zalo PC
+/// (`GetGlobalNoisedIdsHandler` @ `app.asar`: `getprofiles/v2` → `profile.globalId` cho 1-1,
+/// `getmg-v2` → `groupInfo.globalId` cho nhóm; KHÔNG dùng `/api/znoise` vì `znoise` trả ID khác
+/// khiến iPhone báo `transfer_error` `err=999` cho mọi partition).
 pub async fn resolve_thread_partitions(s: &Session, threads: &[Thread]) -> Vec<String> {
-    let mut fids: Vec<i64> = Vec::new();
-    let mut gids: Vec<i64> = Vec::new();
+    let own_uin = s
+        .login
+        .as_ref()
+        .map(|l| l.uin.trim().to_string())
+        .unwrap_or_default();
+    let send2me_id = s
+        .login
+        .as_ref()
+        .map(|l| l.send2me_id.trim().to_string())
+        .unwrap_or_default();
+
+    let mut fids: Vec<String> = Vec::new();
+    // (clean_numeric_gid, original_thread_id)
+    let mut gids: Vec<(String, String)> = Vec::new();
 
     for t in threads {
-        if t.is_group || t.id.starts_with('g') {
-            let num_str = t.id.trim_start_matches('g');
-            if let Ok(gid) = num_str.parse::<i64>() {
-                if !gids.contains(&gid) {
-                    gids.push(gid);
-                }
+        let tid = t.id.trim();
+        if tid.is_empty() || (!send2me_id.is_empty() && tid == send2me_id) {
+            continue;
+        }
+        if t.is_group || tid.starts_with('g') || tid.starts_with("group_") {
+            let clean = tid
+                .trim_start_matches("group_")
+                .trim_start_matches('g')
+                .trim_start_matches('G')
+                .trim();
+            if !clean.is_empty()
+                && clean.bytes().all(|b| b.is_ascii_digit())
+                && !gids.iter().any(|(c, _)| c == clean)
+            {
+                gids.push((clean.to_string(), tid.to_string()));
             }
-        } else if let Ok(fid) = t.id.parse::<i64>() {
-            if !fids.contains(&fid) {
-                fids.push(fid);
+        } else if tid.bytes().all(|b| b.is_ascii_digit()) && !fids.iter().any(|u| u == tid) {
+            fids.push(tid.to_string());
+        }
+    }
+
+    let extract_gid = |v: &Value| -> Option<String> {
+        v.get("globalId")
+            .and_then(|g| {
+                g.as_str()
+                    .map(str::trim)
+                    .map(str::to_string)
+                    .or_else(|| g.as_i64().map(|n| n.to_string()))
+                    .or_else(|| g.as_u64().map(|n| n.to_string()))
+            })
+            .filter(|id| !id.is_empty() && id != "0" && id != "-1")
+    };
+
+    let mut lookup_uids = fids.clone();
+    if !own_uin.is_empty() && !lookup_uids.iter().any(|u| u == &own_uin) {
+        lookup_uids.push(own_uin.clone());
+    }
+
+    let mut resolved_users: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for chunk in lookup_uids.chunks(40) {
+        let pversion_map: Vec<String> = chunk.iter().map(|u| format!("{u}_0")).collect();
+        let body = json!({
+            "phonebook_version": 0,
+            "friend_pversion_map": pversion_map,
+            "avatar_size": 240,
+            "language": "vi",
+            "show_online_status": 1,
+            "imei": s.imei,
+        });
+        let Ok(enc) = s.encoded_params(&body) else {
+            continue;
+        };
+        let url = format!(
+            "{}/api/social/friend/getprofiles/v2?{}",
+            s.domains.profile,
+            s.common_params()
+        );
+        let Ok(resp) = s.post_form(&url, format!("params={enc}")).await else {
+            continue;
+        };
+        let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+        if let Some(changed) = dec
+            .get("data")
+            .and_then(|d| d.get("changed_profiles").or(Some(d)))
+            .and_then(Value::as_object)
+        {
+            for (uid, pval) in changed {
+                let clean_uid = uid.split('_').next().unwrap_or(uid).trim();
+                if let Some(gid) = extract_gid(pval) {
+                    resolved_users.insert(clean_uid.to_string(), gid);
+                }
             }
         }
     }
 
-    if fids.is_empty() && gids.is_empty() {
-        return Vec::new();
+    // Fallback cho hội thoại 1-1 người lạ chưa nằm trong `changed_profiles` (tối đa 12 hội thoại).
+    let missing_uids: Vec<String> = fids
+        .iter()
+        .filter(|u| !resolved_users.contains_key(*u))
+        .take(12)
+        .cloned()
+        .collect();
+    for uid in &missing_uids {
+        let body = json!({
+            "phonebook_version": 0,
+            "friend_pversion_map": [format!("{uid}_0")],
+            "avatar_size": 240,
+            "language": "vi",
+            "show_online_status": 1,
+            "imei": s.imei,
+        });
+        let Ok(enc) = s.encoded_params(&body) else {
+            continue;
+        };
+        let url = format!(
+            "{}/api/social/friend/getprofiles?{}&params={enc}&os=8",
+            s.domains.profile,
+            s.common_params()
+        );
+        if let Ok(resp) = s.get(&url).await {
+            let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+            if let Some(prof_obj) = dec.get("data").and_then(|d| d.get(uid).or(Some(d))) {
+                if let Some(gid) = extract_gid(prof_obj) {
+                    resolved_users.insert(uid.clone(), gid);
+                }
+            }
+        }
     }
-
-    let noise_body = json!({
-        "fids": fids,
-        "gids": gids
-    });
-
-    let Ok(enc_params) = s.encoded_params(&noise_body) else {
-        return Vec::new();
-    };
-
-    let znoise_url = format!("https://zwid.api.zalo.me/api/znoise?{}", s.common_params());
-    let Ok(resp) = s.post_form(&znoise_url, format!("params={enc_params}")).await else {
-        return Vec::new();
-    };
-    let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
 
     let mut partitions = Vec::new();
     let mut noised_to_real: Vec<(String, String, bool)> = Vec::new();
-    if let Some(data) = dec.get("data") {
-        if let Some(arr) = data.get("fids").and_then(|v| v.as_array()) {
-            for (fid, v) in fids.iter().zip(arr.iter()) {
-                if let Some(nid) = v.as_str() {
-                    if !nid.is_empty() {
-                        let part = format!("oneone/{nid}");
-                        partitions.push(part);
-                        noised_to_real.push((nid.to_string(), fid.to_string(), false));
-                    }
-                }
-            }
+
+    if !own_uin.is_empty() {
+        if let Some(my_gid) = resolved_users.get(&own_uin) {
+            noised_to_real.push((my_gid.clone(), own_uin.clone(), false));
         }
-        if let Some(arr) = data.get("gids").and_then(|v| v.as_array()) {
-            for (gid, v) in gids.iter().zip(arr.iter()) {
-                if let Some(nid) = v.as_str() {
-                    if !nid.is_empty() {
-                        let part = format!("group/{nid}");
-                        partitions.push(part);
-                        noised_to_real.push((nid.to_string(), gid.to_string(), true));
+    }
+
+    for fid in &fids {
+        if !own_uin.is_empty() && fid == &own_uin {
+            continue;
+        }
+        if let Some(gid) = resolved_users.get(fid) {
+            partitions.push(format!("oneone/{gid}"));
+            noised_to_real.push((gid.clone(), fid.clone(), false));
+        }
+    }
+
+    if !gids.is_empty() {
+        let raw_gids: Vec<String> = gids.iter().map(|(c, _)| c.clone()).collect();
+        if let Ok((info_map, _)) = fetch_group_profiles(s, &raw_gids).await {
+            for (clean_gid, orig_tid) in &gids {
+                if let Some(gval) = info_map
+                    .get(clean_gid)
+                    .or_else(|| info_map.get(&format!("g{clean_gid}")))
+                {
+                    if let Some(gid) = extract_gid(gval) {
+                        partitions.push(format!("group/{gid}"));
+                        noised_to_real.push((gid, orig_tid.clone(), true));
                     }
                 }
             }
         }
     }
+
     if !noised_to_real.is_empty() {
         crate::history_sync::record_sync_v2_partition_map(&noised_to_real);
     }
@@ -9157,6 +9259,17 @@ pub enum MobileSyncControlEvent {
         batch_type: u8,
         is_last: bool,
     },
+    /// `act == "upload_batch"` with `err == 0`, empty `msgUrl`, and `isLast == 1`.
+    SyncV2EmptyDone { sync_id: String },
+    /// `act == "transfer_status"` (`status == 2`) — phone went idle/backgrounded.
+    SyncV2MobileIdle { sync_id: String },
+    /// `act == "transfer_error"`, `upload_batch` with `err != 0`, or fatal mobile status (9/10).
+    SyncV2Error {
+        sync_id: String,
+        err: i64,
+        message: String,
+        is_last: bool,
+    },
 }
 
 /// Extract `transfer_msg` / `syncmsgmb` / `transfer_sync2` events from a control payload.
@@ -9192,6 +9305,35 @@ pub fn extract_mobile_sync_controls(data_node: &Value) -> Vec<MobileSyncControlE
             Some(v) => v.clone(),
             None => Value::Null,
         };
+        if act_type == "transfer_sync2" && act != "transfer_after_login" {
+            let sid_log = parsed_data
+                .get("syncId")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            let st_log = parsed_data
+                .get("status")
+                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
+            let bt_log = parsed_data
+                .get("batchType")
+                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
+            let err_log = parsed_data
+                .get("err")
+                .or_else(|| parsed_data.get("errorCode"))
+                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
+            let last_log = parsed_data.get("isLast").and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str()?.parse().ok())
+                    .or_else(|| v.as_bool().map(|b| if b { 1 } else { 0 }))
+            });
+            let has_url = parsed_data
+                .get("msgUrl")
+                .or_else(|| parsed_data.get("url"))
+                .and_then(Value::as_str)
+                .is_some_and(|u| !u.is_empty());
+            crate::logger::log_sync(&format!(
+                "ctrl transfer_sync2: act={act} sync={sid_log} status={st_log:?} batchType={bt_log:?} err={err_log:?} isLast={last_log:?} has_url={has_url}"
+            ));
+        }
         match act {
             "transfer_after_login" => {
                 if let Some(tk) = parsed_data
@@ -9229,20 +9371,32 @@ pub fn extract_mobile_sync_controls(data_node: &Value) -> Vec<MobileSyncControlE
                     .unwrap_or_default()
                     .to_string();
                 match st {
+                    2 => out.push(MobileSyncControlEvent::SyncV2MobileIdle { sync_id: sid }),
                     3 => out.push(MobileSyncControlEvent::WaitingConfirmOnPhone { sync_id: sid }),
                     4 | 5 => out.push(MobileSyncControlEvent::UserConfirmed),
                     6 | 7 => out.push(MobileSyncControlEvent::UserRejected),
                     8 => out.push(MobileSyncControlEvent::MobileBusyRestoring),
+                    9 => out.push(MobileSyncControlEvent::SyncV2Error {
+                        sync_id: sid,
+                        err: 1105,
+                        message: "Điện thoại hết dung lượng trống".to_string(),
+                        is_last: true,
+                    }),
+                    10 => out.push(MobileSyncControlEvent::SyncV2Error {
+                        sync_id: sid,
+                        err: 1107,
+                        message: "Zalo trên điện thoại đã đăng xuất".to_string(),
+                        is_last: true,
+                    }),
                     _ => {}
                 }
             }
             "upload_batch" => {
-                let url = parsed_data
-                    .get("msgUrl")
-                    .or_else(|| parsed_data.get("url"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                let err = parsed_data
+                    .get("err")
+                    .or_else(|| parsed_data.get("errorCode"))
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+                    .unwrap_or(0);
                 let sid = parsed_data
                     .get("syncId")
                     .and_then(Value::as_str)
@@ -9250,13 +9404,38 @@ pub fn extract_mobile_sync_controls(data_node: &Value) -> Vec<MobileSyncControlE
                     .to_string();
                 let batch_type = parsed_data
                     .get("batchType")
-                    .and_then(|v| v.as_i64())
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
                     .unwrap_or(0) as u8;
                 let is_last = parsed_data
                     .get("isLast")
-                    .and_then(|v| v.as_i64())
+                    .and_then(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str()?.parse().ok())
+                            .or_else(|| v.as_bool().map(|b| if b { 1 } else { 0 }))
+                    })
                     .unwrap_or(0)
                     == 1;
+                if err != 0 {
+                    let message = parsed_data
+                        .get("errorMessage")
+                        .or_else(|| parsed_data.get("message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Điện thoại báo lỗi upload batch")
+                        .to_string();
+                    out.push(MobileSyncControlEvent::SyncV2Error {
+                        sync_id: sid,
+                        err,
+                        message,
+                        is_last: is_last || batch_type == 2,
+                    });
+                    continue;
+                }
+                let url = parsed_data
+                    .get("msgUrl")
+                    .or_else(|| parsed_data.get("url"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 if !url.is_empty() {
                     out.push(MobileSyncControlEvent::SyncV2Batch {
                         url,
@@ -9264,9 +9443,48 @@ pub fn extract_mobile_sync_controls(data_node: &Value) -> Vec<MobileSyncControlE
                         batch_type,
                         is_last,
                     });
+                } else if is_last && act_type == "transfer_sync2" {
+                    out.push(MobileSyncControlEvent::SyncV2EmptyDone { sync_id: sid });
                 } else {
                     out.push(MobileSyncControlEvent::MobileBusyRestoring);
                 }
+            }
+            "transfer_error" => {
+                let sid = parsed_data
+                    .get("syncId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let err = parsed_data
+                    .get("errorCode")
+                    .or_else(|| parsed_data.get("err"))
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+                    .unwrap_or(-1);
+                let batch_type = parsed_data
+                    .get("batchType")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+                    .unwrap_or(0) as u8;
+                let is_last = parsed_data
+                    .get("isLast")
+                    .and_then(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str()?.parse().ok())
+                            .or_else(|| v.as_bool().map(|b| if b { 1 } else { 0 }))
+                    })
+                    .unwrap_or(0)
+                    == 1;
+                let message = parsed_data
+                    .get("errorMessage")
+                    .or_else(|| parsed_data.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Điện thoại báo lỗi đồng bộ")
+                    .to_string();
+                out.push(MobileSyncControlEvent::SyncV2Error {
+                    sync_id: sid,
+                    err,
+                    message,
+                    is_last: is_last || batch_type == 2,
+                });
             }
             "syncmsg_info" => {
                 let url = parsed_data
@@ -10963,6 +11181,90 @@ mod send_identity_tests {
                 file_name: "backup.zdb".into(),
                 encrypted_key: "enc_key_b64".into(),
                 checksum: "md5_123".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_mobile_sync_controls_handles_v2_idle_errors_and_empty_last() {
+        let payload = json!({
+            "controls": [
+                {
+                    "content": {
+                        "act_type": "transfer_sync2",
+                        "act": "transfer_status",
+                        "data": "{\"syncId\":\"s1\",\"status\":2}"
+                    }
+                },
+                {
+                    "content": {
+                        "act_type": "transfer_sync2",
+                        "act": "upload_batch",
+                        "data": { "syncId": "s1", "err": 1120, "errorMessage": "partition missing" }
+                    }
+                },
+                {
+                    "content": {
+                        "act_type": "transfer_sync2",
+                        "act": "upload_batch",
+                        "data": { "syncId": "s1", "err": 0, "msgUrl": "", "batchType": 1, "isLast": 1 }
+                    }
+                },
+                {
+                    "content": {
+                        "act_type": "transfer_sync2",
+                        "act": "upload_batch",
+                        "data": { "syncId": "s1", "err": 0, "msgUrl": "https://cdn/b1", "batchType": "1", "isLast": "1" }
+                    }
+                },
+                {
+                    "content": {
+                        "act_type": "transfer_sync2",
+                        "act": "transfer_error",
+                        "data": { "syncId": "s1", "errorCode": 1031, "errorMessage": "timeout", "isLast": 1 }
+                    }
+                }
+            ]
+        });
+        let evs = extract_mobile_sync_controls(&payload);
+        assert_eq!(evs.len(), 5);
+        assert_eq!(
+            evs[0],
+            MobileSyncControlEvent::SyncV2MobileIdle {
+                sync_id: "s1".into()
+            }
+        );
+        assert_eq!(
+            evs[1],
+            MobileSyncControlEvent::SyncV2Error {
+                sync_id: "s1".into(),
+                err: 1120,
+                message: "partition missing".into(),
+                is_last: false,
+            }
+        );
+        assert_eq!(
+            evs[2],
+            MobileSyncControlEvent::SyncV2EmptyDone {
+                sync_id: "s1".into()
+            }
+        );
+        assert_eq!(
+            evs[3],
+            MobileSyncControlEvent::SyncV2Batch {
+                url: "https://cdn/b1".into(),
+                sync_id: "s1".into(),
+                batch_type: 1,
+                is_last: true
+            }
+        );
+        assert_eq!(
+            evs[4],
+            MobileSyncControlEvent::SyncV2Error {
+                sync_id: "s1".into(),
+                err: 1031,
+                message: "timeout".into(),
+                is_last: true,
             }
         );
     }

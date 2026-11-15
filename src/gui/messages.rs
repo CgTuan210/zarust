@@ -81,30 +81,56 @@ pub(super) struct CallCardView {
 
 /// Detect whether `msg` is a voice/video call log entry and parse its structured metadata.
 pub(super) fn extract_call_card_view(msg: &ChatMessage) -> Option<CallCardView> {
-    let raw = msg.text.trim();
+    let raw = strip_recall_prefix(msg.text.trim());
     let is_call_id = msg.id.starts_with("call_");
+    let colon_secs = crate::history_sync::parse_colon_duration_secs(raw);
+    let is_legacy_call_bubble = msg.link_title.as_deref() == Some("sendBubbleMessage")
+        || (msg
+            .link_desc
+            .as_deref()
+            .is_some_and(|d| matches!(d.trim(), "Cuộc gọi" | "Cuộc gọi thoại" | "Cuộc gọi video"))
+            && (raw.is_empty() || colon_secs.is_some()));
     let is_call_text = raw == "Cuộc gọi"
         || raw == "Cuộc gọi thoại"
         || raw == "Cuộc gọi video"
+        || raw == "Bạn đã hủy"
+        || raw == "Bạn bị nhỡ"
         || raw.starts_with("📞")
         || raw.starts_with("📹")
         || raw.starts_with("Cuộc gọi đi")
         || raw.starts_with("Cuộc gọi đến")
+        || raw.starts_with("Cuộc gọi thoại")
         || raw.starts_with("Cuộc gọi video");
-    if !is_call_id && !is_call_text {
+    if !is_call_id && !is_call_text && !is_legacy_call_bubble {
         return None;
     }
 
     let lower = raw.to_lowercase();
-    let is_video = lower.contains("video") || raw.starts_with("📹");
-    let is_incoming = lower.contains("gọi đến") || (!lower.contains("gọi đi") && !msg.is_outgoing);
+    let desc_lower = msg
+        .link_desc
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase();
+    let is_video = lower.contains("video") || desc_lower.contains("video") || raw.starts_with("📹");
+    let is_incoming = lower.contains("gọi đến")
+        || lower.contains("gọi thoại đến")
+        || lower.contains("gọi video đến")
+        || raw == "Bạn bị nhỡ"
+        || (!lower.contains("gọi đi")
+            && !lower.contains("gọi thoại đi")
+            && !lower.contains("gọi video đi")
+            && raw != "Bạn đã hủy"
+            && !msg.is_outgoing);
 
-    // Parse optional duration `(Ns)`
-    let secs_opt: Option<u64> = raw.find('(').and_then(|open| {
-        let rest = &raw[open + 1..];
-        let close = rest.find("s)")?;
-        rest[..close].trim().parse::<u64>().ok()
-    });
+    // Parse optional duration `(Ns)` or Sync V2 bare `mm:ss` / `hh:mm:ss`
+    let secs_opt: Option<u64> = raw
+        .find('(')
+        .and_then(|open| {
+            let rest = &raw[open + 1..];
+            let close = rest.find("s)")?;
+            rest[..close].trim().parse::<u64>().ok()
+        })
+        .or(colon_secs);
 
     // Parse optional failure/rejection reason after `—` or `-`
     let raw_reason = raw
@@ -116,10 +142,39 @@ pub(super) fn extract_call_card_view(msg: &ChatMessage) -> Option<CallCardView> 
     let is_missed_or_failed = match secs_opt {
         Some(0) => true,
         Some(_) => raw_reason.is_some(),
-        None => raw_reason.is_some() || (!msg.is_outgoing && raw == "Cuộc gọi"),
+        None => {
+            raw_reason.is_some()
+                || raw.is_empty()
+                || raw == "Bạn đã hủy"
+                || raw == "Bạn bị nhỡ"
+                || (!msg.is_outgoing && raw == "Cuộc gọi")
+        }
     };
 
-    let title = if is_video {
+    let call_kind_label = if is_video {
+        "Cuộc gọi video"
+    } else {
+        "Cuộc gọi thoại"
+    };
+    let is_cancelled_by_caller = !is_incoming
+        && is_missed_or_failed
+        && (raw == "Bạn đã hủy"
+            || raw.is_empty()
+            || raw_reason.as_deref() == Some("Bạn đã hủy"));
+    let is_missed_incoming = is_incoming
+        && is_missed_or_failed
+        && (raw == "Bạn bị nhỡ"
+            || raw.is_empty()
+            || matches!(
+                raw_reason.as_deref(),
+                None | Some("Bạn bị nhỡ") | Some("Bạn đã bỏ lỡ cuộc gọi này")
+            ));
+
+    let title = if is_cancelled_by_caller {
+        "Bạn đã hủy".to_string()
+    } else if is_missed_incoming {
+        "Bạn bị nhỡ".to_string()
+    } else if is_video {
         if is_incoming {
             if is_missed_or_failed {
                 "Cuộc gọi video nhỡ".to_string()
@@ -140,27 +195,37 @@ pub(super) fn extract_call_card_view(msg: &ChatMessage) -> Option<CallCardView> 
     };
 
     let arrow = if is_incoming { "↙" } else { "↗" };
-    let status_badge = match (is_missed_or_failed, secs_opt) {
-        // The title already names the missed/failed state; show the reason instead of repeating it.
-        (true, _) => {
-            let reason_txt = raw_reason
-                .as_deref()
-                .filter(|r| !r.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    if is_incoming {
-                        "Bạn đã bỏ lỡ cuộc gọi này".to_string()
-                    } else {
-                        "Người nhận không nghe máy".to_string()
-                    }
-                });
-            format!("{arrow} {reason_txt}")
+    let status_badge = if is_cancelled_by_caller || is_missed_incoming {
+        format!("{arrow} {call_kind_label}")
+    } else {
+        match (is_missed_or_failed, secs_opt) {
+            (true, _) => {
+                let reason_txt = raw_reason
+                    .as_deref()
+                    .filter(|r| !r.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        if is_incoming {
+                            "Bạn đã bỏ lỡ cuộc gọi này".to_string()
+                        } else {
+                            "Người nhận không nghe máy".to_string()
+                        }
+                    });
+                format!("{arrow} {reason_txt}")
+            }
+            (false, Some(s)) if s >= 3600 => {
+                format!(
+                    "{arrow} {} giờ {} phút {} giây",
+                    s / 3600,
+                    (s % 3600) / 60,
+                    s % 60
+                )
+            }
+            (false, Some(s)) => {
+                format!("{arrow} {} phút {} giây", s / 60, s % 60)
+            }
+            (false, None) => format!("{arrow} Đã kết thúc"),
         }
-        (false, Some(s)) if s >= 60 => {
-            format!("{arrow} Thời lượng: {} phút {:02} giây", s / 60, s % 60)
-        }
-        (false, Some(s)) => format!("{arrow} Thời lượng: {s} giây"),
-        (false, None) => format!("{arrow} Đã kết thúc"),
     };
 
     // When the call is missed/failed the badge already carries the reason, so only surface a
@@ -956,7 +1021,7 @@ pub(super) fn render_date_divider(ui: &mut egui::Ui, msg: &ChatMessage, pal: &Th
 
 /// Detect whether `msg` is a system/event notification rather than a user speech bubble.
 pub(super) fn is_system_notice_message(msg: &ChatMessage) -> bool {
-    if msg.id.starts_with("sys_") {
+    if msg.id.starts_with("sys_") || msg.kind == crate::message_model::MessageKind::System {
         return true;
     }
     let t = msg.text.trim();
@@ -967,6 +1032,8 @@ pub(super) fn is_system_notice_message(msg: &ChatMessage) -> bool {
         || t.contains("đã tham gia nhóm")
         || t.contains("đã rời khỏi nhóm")
         || t.contains("đã đổi tên nhóm")
+        || t.contains("đã ghim tin nhắn")
+        || t.contains("đã bỏ ghim tin nhắn")
 }
 
 /// Render a centered system event pill (e.g., friend connected, group event).
@@ -3638,10 +3705,12 @@ pub(super) fn render_chat_bubble(
     let has_sticker = !vanished && is_sticker_message(msg).is_some();
     let call_card_opt = if vanished { None } else { extract_call_card_view(msg) };
     let is_call_card = call_card_opt.is_some();
-    let is_photo_card = !vanished && !has_sticker && is_zalo_photo_message(msg);
-    let is_file_card = !vanished && !has_sticker && is_zalo_file_or_video_message(msg);
+    let is_photo_card = !vanished && !has_sticker && !is_call_card && is_zalo_photo_message(msg);
+    let is_file_card =
+        !vanished && !has_sticker && !is_call_card && is_zalo_file_or_video_message(msg);
     let has_link_card = !vanished
         && !has_sticker
+        && !is_call_card
         && !is_photo_card
         && !is_file_card
         && extract_message_link_view(msg).is_some();
@@ -6015,5 +6084,58 @@ mod md_block_tests {
         assert!(lw > lh, "Landscape video must have width > height: ({lw}, {lh})");
         assert!(lw >= 160.0 && lw <= 280.0, "Landscape width within bounds: {lw}");
         assert!(lh <= 180.0, "Landscape height capped at 180: {lh}");
+    }
+
+    #[test]
+    fn extract_call_card_view_parses_sync_v2_and_legacy_call_bubbles() {
+        // 1. Legacy unhealed Sync V2 incoming call "0:18" + sendBubbleMessage
+        let legacy_in = ChatMessage {
+            id: "1001".into(),
+            text: "0:18".into(),
+            is_outgoing: false,
+            link_title: Some("sendBubbleMessage".into()),
+            link_desc: Some("Cuộc gọi".into()),
+            ..Default::default()
+        };
+        let card1 = extract_call_card_view(&legacy_in).expect("must detect legacy call bubble");
+        assert_eq!(card1.title, "Cuộc gọi thoại đến");
+        assert_eq!(card1.status_badge, "↙ 0 phút 18 giây");
+        assert!(!card1.is_missed_or_failed);
+        assert!(!card1.is_video);
+
+        // 2. Legacy outgoing cancelled call (empty text + sendBubbleMessage)
+        let legacy_cancel = ChatMessage {
+            id: "1002".into(),
+            text: String::new(),
+            is_outgoing: true,
+            link_title: Some("sendBubbleMessage".into()),
+            link_desc: Some("Cuộc gọi".into()),
+            ..Default::default()
+        };
+        let card2 = extract_call_card_view(&legacy_cancel).expect("must detect cancelled call");
+        assert_eq!(card2.title, "Bạn đã hủy");
+        assert_eq!(card2.status_badge, "↗ Cuộc gọi thoại");
+        assert!(card2.is_missed_or_failed);
+
+        // 3. Canonical healed Sync V2 incoming call (74s -> 1 phút 14 giây)
+        let canonical_in = ChatMessage {
+            id: "1003".into(),
+            text: "📞 Cuộc gọi thoại đến (74s)".into(),
+            is_outgoing: false,
+            ..Default::default()
+        };
+        let card3 = extract_call_card_view(&canonical_in).expect("must detect canonical call");
+        assert_eq!(card3.title, "Cuộc gọi thoại đến");
+        assert_eq!(card3.status_badge, "↙ 1 phút 14 giây");
+        assert!(!card3.is_missed_or_failed);
+
+        // 4. Plain chat message with colon time ("9:30") must NEVER be treated as a call
+        let plain_time = ChatMessage {
+            id: "1004".into(),
+            text: "9:30".into(),
+            is_outgoing: false,
+            ..Default::default()
+        };
+        assert!(extract_call_card_view(&plain_time).is_none());
     }
 }

@@ -8,6 +8,8 @@
 //! - `set <key>` : store in OS keychain.
 //! - `clear` : delete from keychain.
 
+#[cfg(target_os = "macos")]
+use anyhow::Context;
 use anyhow::Result;
 
 pub const SERVICE: &str = "ctdozlite";

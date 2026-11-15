@@ -274,7 +274,8 @@ impl MessageStore {
         Self::ensure_edit_history_schema(&conn)?;
         // Per-thread mini script workspace: bảng thread_scripts + thread_data + logs.
         Self::ensure_script_schema(&conn)?;
-        if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1 {
+        let user_ver = conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
+        if user_ver < 1 {
             conn.execute_batch(
                 "BEGIN;
                  DELETE FROM messages WHERE text = 'sendBubbleMessage';
@@ -282,8 +283,166 @@ impl MessageStore {
                  COMMIT;",
             )?;
         }
+        if user_ver < 2 {
+            Self::heal_sync_v2_misdecoded_rows(&conn)?;
+            conn.execute_batch("PRAGMA user_version = 2;")?;
+        }
 
         Ok(Self { conn })
+    }
+
+    /// One-time migration (`user_version = 2`): repairs Sync V2 messages that were previously
+    /// imported with bare call durations (`"0:18"`, `""` + `sendBubbleMessage`), photos mislabeled
+    /// as `[Tin nhắn thoại]`, empty-text link/photo rows, or `ChatInfo` pin notices marked `chat.undo`.
+    fn heal_sync_v2_misdecoded_rows(conn: &Connection) -> Result<()> {
+        let mut updates: Vec<(String, String, String, String)> = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT msg_id, text, msg_type, is_outgoing, raw_json
+                 FROM messages
+                 WHERE raw_json LIKE '%sendBubbleMessage%'
+                    OR (text = '[Tin nhắn thoại]' AND raw_json LIKE '%link_url%')
+                    OR (TRIM(text) = '' AND raw_json LIKE '%link_url%')
+                    OR (msg_type = 'chat.undo' AND text LIKE '[Đã thu hồi] %' AND raw_json LIKE '%link_title%')",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let msg_id: String = row.get(0)?;
+                let text: String = row.get::<_, String>(1).unwrap_or_default();
+                let msg_type: String = row.get::<_, String>(2).unwrap_or_default();
+                let is_out: i64 = row.get::<_, i64>(3).unwrap_or(0);
+                let raw_json: String = row.get::<_, String>(4).unwrap_or_default();
+                let is_outgoing = is_out != 0;
+
+                let Ok(serde_json::Value::Object(mut map)) =
+                    serde_json::from_str::<serde_json::Value>(&raw_json)
+                else {
+                    continue;
+                };
+
+                let link_title = map
+                    .get("link_title")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let link_desc = map
+                    .get("link_desc")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let link_url = map
+                    .get("link_url")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+
+                if link_title.as_deref() == Some("sendBubbleMessage") {
+                    let (call_txt, is_video, dur_opt) =
+                        crate::history_sync::format_sync_v2_call_text(
+                            &text,
+                            None,
+                            None,
+                            link_desc.as_deref(),
+                            is_outgoing,
+                        );
+                    map.remove("link_title");
+                    map.remove("link_desc");
+                    map.insert("call_bubble".into(), serde_json::json!(true));
+                    map.insert("is_video".into(), serde_json::json!(is_video));
+                    if let Some(dur) = dur_opt {
+                        map.insert("duration".into(), serde_json::json!(dur));
+                    }
+                    updates.push((
+                        msg_id,
+                        call_txt,
+                        "chat.ecall".to_string(),
+                        serde_json::Value::Object(map).to_string(),
+                    ));
+                    continue;
+                }
+
+                if let Some(url) = link_url.as_deref().filter(|u| !u.is_empty()) {
+                    let lower_u = url.to_ascii_lowercase();
+                    let is_photo_url = crate::chat::is_zalo_photo_cdn_url(url)
+                        || ((lower_u.contains("photo-stal")
+                            || lower_u.contains("photo-zmp")
+                            || lower_u.contains("zpc.zdn.vn"))
+                            && (lower_u.ends_with(".jpg")
+                                || lower_u.ends_with(".jpeg")
+                                || lower_u.ends_with(".png")
+                                || lower_u.ends_with(".webp")
+                                || lower_u.ends_with(".gif")));
+                    if text == "[Tin nhắn thoại]" && is_photo_url {
+                        map.insert("link_src".into(), serde_json::json!("Hình ảnh Zalo"));
+                        updates.push((
+                            msg_id,
+                            "[Hình ảnh]".to_string(),
+                            "chat.photo".to_string(),
+                            serde_json::Value::Object(map).to_string(),
+                        ));
+                        continue;
+                    }
+                    if text.trim().is_empty() {
+                        if is_photo_url {
+                            map.insert("link_src".into(), serde_json::json!("Hình ảnh Zalo"));
+                            updates.push((
+                                msg_id,
+                                "[Hình ảnh]".to_string(),
+                                "chat.photo".to_string(),
+                                serde_json::Value::Object(map).to_string(),
+                            ));
+                        } else if lower_u.starts_with("http://") || lower_u.starts_with("https://")
+                        {
+                            updates.push((
+                                msg_id,
+                                url.to_string(),
+                                "chat.recommended".to_string(),
+                                serde_json::Value::Object(map).to_string(),
+                            ));
+                        }
+                        continue;
+                    }
+                }
+
+                if msg_type == "chat.undo" {
+                    if let (Some(stripped), Some(lt)) =
+                        (text.strip_prefix("[Đã thu hồi] "), link_title.as_deref())
+                    {
+                        if stripped.trim() == lt.trim()
+                            && (lt.contains("đã ghim tin nhắn")
+                                || lt.contains("đã bỏ ghim")
+                                || lt.contains("đã tham gia nhóm")
+                                || lt.contains("đã thêm ")
+                                || lt.contains("đã đổi tên nhóm"))
+                        {
+                            map.remove("link_title");
+                            let new_raw = if map.is_empty() {
+                                String::new()
+                            } else {
+                                serde_json::Value::Object(map).to_string()
+                            };
+                            updates.push((
+                                msg_id,
+                                lt.trim().to_string(),
+                                "chat.system".to_string(),
+                                new_raw,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if !updates.is_empty() {
+            let tx = conn.unchecked_transaction()?;
+            {
+                let mut upd_stmt = tx.prepare(
+                    "UPDATE messages SET text = ?2, msg_type = ?3, raw_json = ?4 WHERE msg_id = ?1",
+                )?;
+                for (mid, new_text, new_type, new_raw) in updates {
+                    let _ = upd_stmt.execute(params![mid, new_text, new_type, new_raw]);
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(())
     }
 
     /// Thêm cột vanish / bảng `thread_vanish` cho DB cũ (pre-vanish slice).
@@ -2015,8 +2174,33 @@ impl MessageStore {
                         || l.ends_with(".mp4")
                 });
                 let mut final_text = sm.text;
-                let mut final_kind = crate::message_model::MessageKind::Text;
-                if is_video_url || link_src.as_deref() == Some("Video Zalo") {
+                let parsed_kind = crate::message_model::MessageKind::from_wire_name(&sm.msg_type);
+                let mut final_kind = if parsed_kind == crate::message_model::MessageKind::Unknown {
+                    crate::message_model::MessageKind::Text
+                } else {
+                    parsed_kind
+                };
+                if sm.msg_type == "chat.ecall"
+                    || link_title.as_deref() == Some("sendBubbleMessage")
+                {
+                    if !final_text.trim_start().starts_with("📞")
+                        && !final_text.trim_start().starts_with("📹")
+                        && !final_text.trim_start().starts_with("Cuộc gọi")
+                    {
+                        let (call_txt, _, _) = crate::history_sync::format_sync_v2_call_text(
+                            &final_text,
+                            None,
+                            None,
+                            link_desc.as_deref(),
+                            sm.is_outgoing,
+                        );
+                        final_text = call_txt;
+                    }
+                    if link_title.as_deref() == Some("sendBubbleMessage") {
+                        link_title = None;
+                        link_desc = None;
+                    }
+                } else if is_video_url || link_src.as_deref() == Some("Video Zalo") {
                     link_src = Some("Video Zalo".to_string());
                     link_title = Some("Video".to_string());
                     final_kind = crate::message_model::MessageKind::Video;
@@ -2072,7 +2256,26 @@ impl MessageStore {
                                     && cm.ts != 0
                                     && (existing.ts - cm.ts).abs() < 5000)))
                 }) {
-                    crate::chat::apply_recall_merge(existing, &cm.text);
+                    if existing.link_title.as_deref() == Some("sendBubbleMessage") {
+                        existing.link_title = None;
+                        existing.link_desc = None;
+                    }
+                    let stale_sync_v2_cache = !cm.text.is_empty()
+                        && (existing.text.trim().is_empty()
+                            || (crate::history_sync::is_raw_call_duration_text(&existing.text)
+                                && (cm.text.starts_with("📞") || cm.text.starts_with("📹")))
+                            || (existing.text == "[Tin nhắn thoại]" && cm.text == "[Hình ảnh]")
+                            || (existing.text.starts_with("[Đã thu hồi] ")
+                                && cm.kind == crate::message_model::MessageKind::System));
+                    if stale_sync_v2_cache {
+                        existing.text = cm.text.clone();
+                        existing.kind = cm.kind;
+                        existing.link_src = cm.link_src.clone();
+                        existing.link_title = cm.link_title.clone();
+                        existing.link_desc = cm.link_desc.clone();
+                    } else {
+                        crate::chat::apply_recall_merge(existing, &cm.text);
+                    }
                     if existing.kind == crate::message_model::MessageKind::Text
                         && cm.kind != crate::message_model::MessageKind::Text
                         && cm.kind != crate::message_model::MessageKind::Recall
@@ -4155,6 +4358,95 @@ mod tests {
         writer.conn.execute_batch("COMMIT").unwrap();
         drop(reader);
         drop(writer);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_v2_heals_sync_v2_call_and_photo_rows_and_refreshes_cache() {
+        let dir = std::env::temp_dir().join(format!(
+            "ctdozlite-mig2-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path_buf = dir.join("history.db");
+        let path = path_buf.to_str().unwrap();
+
+        {
+            let mut st = MessageStore::open(path).unwrap();
+            st.upsert_thread(&StoredThread {
+                thread_id: "t1".into(),
+                name: "Đỗ Thành".into(),
+                is_group: false,
+                last_ts: 1000,
+                ..Default::default()
+            })
+            .unwrap();
+            st.upsert_message(&StoredMessage {
+                msg_id: "call_1".into(),
+                thread_id: "t1".into(),
+                sender_id: "t1".into(),
+                sender_name: "Đỗ Thành".into(),
+                text: "0:18".into(),
+                msg_type: "chat.text".into(),
+                ts: 1000,
+                is_outgoing: false,
+                raw_json: r#"{"link_desc":"Cuộc gọi","link_title":"sendBubbleMessage"}"#.into(),
+            })
+            .unwrap();
+            st.upsert_message(&StoredMessage {
+                msg_id: "photo_1".into(),
+                thread_id: "t1".into(),
+                sender_id: "t1".into(),
+                sender_name: "Đỗ Thành".into(),
+                text: "[Tin nhắn thoại]".into(),
+                msg_type: "chat.voice".into(),
+                ts: 2000,
+                is_outgoing: false,
+                raw_json: r#"{"link_src":"Thoại Zalo","link_url":"https://photo-stal-27.zdn.vn/no/abc.jpg"}"#.into(),
+            })
+            .unwrap();
+            // Simulate pre-v2 database
+            st.conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+        }
+
+        // Reopen triggers v2 self-heal migration
+        let st = MessageStore::open(path).unwrap();
+        let mut threads = vec![Thread {
+            id: "t1".into(),
+            name: "Đỗ Thành".into(),
+            messages: vec![
+                ChatMessage {
+                    id: "call_1".into(),
+                    text: "0:18".into(),
+                    is_outgoing: false,
+                    ts: 1000,
+                    link_title: Some("sendBubbleMessage".into()),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "photo_1".into(),
+                    text: "[Tin nhắn thoại]".into(),
+                    is_outgoing: false,
+                    ts: 2000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+        st.hydrate_threads(&mut threads, 50).unwrap();
+        assert_eq!(threads[0].messages[0].text, "📞 Cuộc gọi thoại đến (18s)");
+        assert!(threads[0].messages[0].link_title.is_none());
+        assert_eq!(threads[0].messages[1].text, "[Hình ảnh]");
+        assert_eq!(
+            threads[0].messages[1].link_src.as_deref(),
+            Some("Hình ảnh Zalo")
+        );
+
+        drop(st);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
