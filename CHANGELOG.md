@@ -5,6 +5,17 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-16
+
+### Added (Tính năng mới & Cập nhật)
+- **Đồng bộ tin nhắn Sync V2 di động tối ưu (`src/chat.rs`, `src/gui/modals.rs`):** Truyền `tempKey` quét mã QR vào gói `cmd 590` và kích hoạt song song phiên HTTP `cmd 12888`; thanh tiến trình đồng bộ hiển thị trực quan phần trăm `%`, trạng thái giải mã gói tin từ điện thoại và văn bản hướng dẫn rõ ràng.
+- **Thẻ cuộc gọi chuyên nghiệp (Call Cards) (`src/history.rs`, `src/gui/messages.rs`):** Chuẩn hóa toàn bộ tin nhắn cuộc gọi thoại/video thành thẻ cuộc gọi có icon trực quan, phân biệt chiều cuộc gọi (đến, đi, nhỡ, đã hủy), thời lượng hiển thị chi tiết (ví dụ: `0 phút 20 giây`) và nút "Gọi lại".
+- **Căn lề Album ảnh chuẩn xác (`src/gui/messages.rs`):** Khắc phục triệt để lỗi bong bóng lưới album ảnh gửi đi bị lệch giữa, tự động tính toán chính xác bề rộng hiển thị (`album_rendered_width`) và bám sát mép phải (flush right) đồng bộ với giao diện chung.
+- **Thư mục dữ liệu chuẩn macOS & Hoàn thiện CI/CD Cross-Platform (`tests/data_directory_cli.rs`, `.github/workflows/ci-release.yml`):** Tuân thủ đường dẫn dữ liệu chuẩn `Application Support/ctdozlite` trên macOS, đảm bảo toàn bộ pipeline build và kiểm thử đa nền tảng (Linux, Windows, macOS) chạy hoàn toàn 100% xanh.
+
+### Fixed (Sửa lỗi)
+- **Sửa lỗi hiển thị chuỗi thời lượng số trần trên tin nhắn cuộc gọi cũ:** Nâng cấp migration cơ sở dữ liệu SQLite cục bộ để chuẩn hóa các tin nhắn lưu dạng chuỗi thô (`0:18`, `0:28`, ...) về định dạng tin nhắn cuộc gọi chuẩn kèm metadata.
+
 ### Added (Tính năng mới & Cập nhật)
 - **Đính kèm nhiều tệp và cả thư mục trong khung soạn tin (`src/gui/attachments.rs`, `src/gui/workspace.rs`):** Nút đính kèm mở menu "Chọn File" / "Chọn Thư mục"; hộp thoại chọn file và chọn ảnh cho phép chọn nhiều tệp cùng lúc; chọn thư mục sẽ đính kèm toàn bộ tệp hiển thị ở cấp đầu (bỏ tệp ẩn, tệp rỗng, thư mục con). Mọi nguồn (dán `Ctrl+V`, kéo-thả, chụp màn hình, hộp thoại) đều đưa tệp vào hàng chờ tối đa 50 tệp phía trên khung nhập, có ảnh thu nhỏ, bấm để bỏ từng tệp, `Esc` để hủy tất cả; nhấn `Enter` để gửi lần lượt theo đúng thứ tự (chú thích gắn vào tệp đầu tiên).
 - **Gửi nhiều ảnh thành một album (`src/chat.rs`, `re-notes/38_photo_album_group_layout.md`):** Từ 2 ảnh PNG/JPG/WEBP/BMP trở lên trong hàng chờ được gửi kèm `groupLayoutId` chung nên Zalo trên điện thoại/PC hiển thị thành một album; GIF, video và tệp khác vẫn gửi riêng.
