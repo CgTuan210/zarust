@@ -5029,26 +5029,28 @@ fn decode_image_with_fallback(
     if !crate::media::is_ffmpeg_available() {
         return None;
     }
-    let mut child = std::process::Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            "pipe:0",
-            "-vframes",
-            "1",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "png",
-            "pipe:1",
-        ])
+    let png_bytes = transcode_pipe_to_png_with_ffmpeg(bytes, None)?;
+    let img = image::load_from_memory(&png_bytes).ok()?;
+    Some((img, Some(png_bytes)))
+}
+
+/// Transcode stdin media bytes to PNG via `ffmpeg` without flashing a console window on Windows.
+fn transcode_pipe_to_png_with_ffmpeg(bytes: &[u8], vf: Option<&str>) -> Option<Vec<u8>> {
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-vframes", "1"]);
+    if let Some(filter) = vf {
+        cmd.args(["-vf", filter]);
+    }
+    cmd.args(["-f", "image2pipe", "-vcodec", "png", "pipe:1"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(std::process::Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let mut child = cmd.spawn().ok()?;
     use std::io::Write;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(bytes);
@@ -5057,52 +5059,24 @@ fn decode_image_with_fallback(
     if !out.status.success() || out.stdout.is_empty() {
         return None;
     }
-    let img = image::load_from_memory(&out.stdout).ok()?;
-    Some((img, Some(out.stdout)))
+    Some(out.stdout)
 }
 
 fn extract_first_video_frame(bytes: &[u8]) -> Option<image::RgbaImage> {
     // Lấy kích thước frame đã scale trực tiếp từ header PNG của ffmpeg
     // (image2pipe + png): không còn lệch 480x360 vs 320x240 (#4226).
-    let mut child = std::process::Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            "pipe:0",
-            "-vframes",
-            "1",
-            "-vf",
-            "scale=480:-1",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "png",
-            "pipe:1",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    use std::io::Write;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(bytes);
-    }
-    let out = child.wait_with_output().ok()?;
-    if !out.status.success() || out.stdout.is_empty() {
-        return None;
-    }
-    image::load_from_memory(&out.stdout).ok().map(|d| d.to_rgba8())
+    let png_bytes = transcode_pipe_to_png_with_ffmpeg(bytes, Some("scale=480:-1"))?;
+    image::load_from_memory(&png_bytes).ok().map(|d| d.to_rgba8())
 }
 
 
 pub(crate) fn capture_screen_interactive(gui_tx: crate::gui::GuiTx, ctx: egui::Context) {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", "Start-Process ms-screenclip:"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .status();
         let _ = gui_tx.send(crate::gui::GuiEvent::StatusUpdate(
             "Đã mở công cụ chụp ảnh màn hình — sau khi chụp hãy nhấn Ctrl+V để dán".into(),
