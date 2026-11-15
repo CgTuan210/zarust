@@ -2531,6 +2531,7 @@ pub(super) fn render_message_body(
 /// Pure filename + `link_src`/text-prefix heuristics; unknown extensions stay `GenericFile`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AttachmentKind {
+    Image,
     Video,
     Voice,
     Audio,
@@ -2578,6 +2579,8 @@ pub(super) fn classify_attachment(msg: &crate::chat::ChatMessage) -> Option<Atta
         return Some(AttachmentKind::GenericFile);
     }
     Some(match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "ico" | "jfif" | "tif" | "tiff"
+        | "tga" | "qoi" | "pnm" | "avif" | "heic" | "heif" | "jxl" => AttachmentKind::Image,
         "mp4" | "mov" | "mkv" | "avi" | "webm" => AttachmentKind::Video,
         "amr" | "awb" | "opus" => AttachmentKind::Voice,
         "mp3" | "m4a" | "wav" | "ogg" | "flac" | "aac" => AttachmentKind::Audio,
@@ -2593,6 +2596,7 @@ pub(super) fn classify_attachment(msg: &crate::chat::ChatMessage) -> Option<Atta
 
 pub(super) fn attachment_kind_label(kind: AttachmentKind) -> (&'static str, &'static str) {
     match kind {
+        AttachmentKind::Image => (crate::gui::lucide::IMAGE, "Hình ảnh"),
         AttachmentKind::Video => (crate::gui::lucide::FILM, "Video"),
         AttachmentKind::Voice => (crate::gui::lucide::MIC, "Tin nhắn thoại"),
         AttachmentKind::Audio => (crate::gui::lucide::MIC, "Âm thanh"),
@@ -2628,6 +2632,20 @@ fn render_attachment_card(
     preview_error: Option<&str>,
 ) -> Option<BubbleAction> {
     match kind {
+        AttachmentKind::Image => render_image_file_card(
+            ui,
+            msg,
+            file_name,
+            text_col,
+            pal,
+            max_text_width,
+            sticker_textures,
+            loading_stickers,
+            failed_stickers,
+            preview,
+            preview_loading,
+            preview_error,
+        ),
         AttachmentKind::Video => render_video_card(
             ui,
             msg,
@@ -2654,6 +2672,186 @@ fn render_attachment_card(
             preview_error,
         ),
     }
+}
+
+/// Image sent as a file attachment (`chat.file` / `Tập tin · JPG/PNG/WebP/...`):
+/// fetches and renders an inline preview thumbnail clickable to open `ImageViewerModal`,
+/// keeping filename + `Mở` / `Lưu về máy` controls, and falls back to `render_doc_card`.
+#[allow(clippy::too_many_arguments)]
+fn render_image_file_card(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    file_name: &str,
+    text_col: Color32,
+    pal: &ThemePalette,
+    max_text_width: f32,
+    sticker_textures: &HashMap<String, TextureHandle>,
+    loading_stickers: &mut HashSet<String>,
+    failed_stickers: &HashMap<String, (u8, std::time::Instant)>,
+    preview: Option<&str>,
+    preview_loading: bool,
+    preview_error: Option<&str>,
+) -> Option<BubbleAction> {
+    let preview_url = msg
+        .link_thumb
+        .as_deref()
+        .filter(|u| !u.is_empty() && !u.to_ascii_lowercase().contains("/renewmedia"))
+        .or_else(|| {
+            msg.link_url
+                .as_deref()
+                .filter(|u| !u.is_empty() && !u.to_ascii_lowercase().contains("/renewmedia"))
+        });
+
+    if let Some(url) = preview_url {
+        let key = format!("thumb_{}", crate::crypto::md5_hex(url));
+        crate::gui::queue_sticker_fetch(
+            sticker_textures,
+            loading_stickers,
+            failed_stickers,
+            key.clone(),
+            url.to_string(),
+        );
+        if let Some(tex) = sticker_textures.get(&key) {
+            let [tw, th] = tex.size();
+            if tw > 2 && th > 2 {
+                let (thumb_w, thumb_h) = compute_video_thumb_size(tw, th, max_text_width);
+                let full_url = msg
+                    .link_url
+                    .as_deref()
+                    .filter(|u| !u.is_empty() && !u.to_ascii_lowercase().contains("/renewmedia"))
+                    .unwrap_or(url)
+                    .to_string();
+                let mut action = None;
+                let avail_w = ui.available_width();
+                let left_offset = ((avail_w - thumb_w) * 0.5).max(0.0);
+                let img_resp = ui
+                    .horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                        if left_offset > 0.0 {
+                            ui.add_space(left_offset);
+                        }
+                        ui.add(
+                            egui::Image::new(tex)
+                                .fit_to_exact_size(Vec2::new(thumb_w, thumb_h))
+                                .rounding(Rounding::same(8.0))
+                                .sense(Sense::click()),
+                        )
+                    })
+                    .inner
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text("Bấm để phóng to ảnh");
+                ui.painter().rect_stroke(
+                    img_resp.rect,
+                    Rounding::same(8.0),
+                    Stroke::new(1.0_f32, pal.border),
+                );
+                if img_resp.clicked() {
+                    action = Some(BubbleAction::OpenImagePopup {
+                        tex_key: key.clone(),
+                        full_url: full_url.clone(),
+                        title: file_name.to_string(),
+                        sender: msg.sender.clone(),
+                        time: msg.time.clone(),
+                    });
+                }
+                ui.add_space(6.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(truncate_chars(file_name, 42))
+                            .size(12.5)
+                            .color(text_col)
+                            .strong(),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(file_name);
+                let ext = file_name
+                    .rsplit('.')
+                    .next()
+                    .filter(|_| file_name.contains('.'))
+                    .unwrap_or_default()
+                    .to_ascii_uppercase();
+                let meta = if ext.is_empty() {
+                    "Hình ảnh".to_string()
+                } else {
+                    format!("Hình ảnh · {ext}")
+                };
+                ui.label(
+                    RichText::new(meta)
+                        .size(11.0)
+                        .color(text_col.linear_multiply(0.7)),
+                );
+                ui.add_space(6.0);
+                let secondary_btn_fill = if pal.is_dark {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 14)
+                } else {
+                    pal.bg_elevated
+                };
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
+                    let open_resp = ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Mở")
+                                    .size(12.0)
+                                    .color(Color32::WHITE)
+                                    .strong(),
+                            )
+                            .fill(pal.primary)
+                            .stroke(Stroke::NONE)
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(64.0, 28.0)),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Xem ảnh phóng to trong ứng dụng");
+                    if open_resp.clicked() {
+                        action = Some(BubbleAction::OpenImagePopup {
+                            tex_key: key,
+                            full_url,
+                            title: file_name.to_string(),
+                            sender: msg.sender.clone(),
+                            time: msg.time.clone(),
+                        });
+                    }
+                    let save_resp = ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Lưu về máy")
+                                    .size(12.0)
+                                    .color(text_col),
+                            )
+                            .fill(secondary_btn_fill)
+                            .stroke(Stroke::new(1.0_f32, pal.border))
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(98.0, 28.0)),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Tải và lưu tập tin về máy tính");
+                    if save_resp.clicked() {
+                        if let Some(dl_url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
+                            action = Some(BubbleAction::DownloadFile {
+                                url: dl_url.to_string(),
+                                file_name: file_name.to_string(),
+                            });
+                        }
+                    }
+                });
+                return action;
+            }
+        }
+    }
+
+    render_doc_card(
+        ui,
+        msg,
+        AttachmentKind::Image,
+        file_name,
+        text_col,
+        pal,
+        preview,
+        preview_loading,
+        preview_error,
+    )
 }
 
 pub(crate) fn compute_video_thumb_size(tw: usize, th: usize, max_text_width: f32) -> (f32, f32) {
@@ -3492,8 +3690,12 @@ pub(super) fn render_chat_bubble(
             photo_w
         }
     } else if is_file_card || has_link_card {
-        let is_video = classify_attachment(msg) == Some(AttachmentKind::Video);
-        let video_thumb_dim = if is_video {
+        let att_kind = classify_attachment(msg);
+        let is_visual_att = matches!(
+            att_kind,
+            Some(AttachmentKind::Video) | Some(AttachmentKind::Image)
+        );
+        let video_thumb_dim = if is_visual_att {
             let thumb_url = msg
                 .link_thumb
                 .as_deref()
@@ -3503,9 +3705,12 @@ pub(super) fn render_chat_bubble(
                         && !u.to_ascii_lowercase().contains("/renewmedia")
                 })
                 .or_else(|| {
-                    msg.link_url
-                        .as_deref()
-                        .filter(|u| !u.is_empty() && crate::chat::is_zalo_photo_cdn_url(u))
+                    msg.link_url.as_deref().filter(|u| {
+                        !u.is_empty()
+                            && !u.to_ascii_lowercase().contains("/renewmedia")
+                            && (att_kind == Some(AttachmentKind::Image)
+                                || crate::chat::is_zalo_photo_cdn_url(u))
+                    })
                 });
             let key = thumb_url
                 .map(|u| format!("thumb_{}", crate::crypto::md5_hex(u)))
@@ -3523,7 +3728,12 @@ pub(super) fn render_chat_bubble(
             None
         };
         if let Some((vw, _)) = video_thumb_dim {
-            vw.min(max_text_width)
+            let min_att_w = if att_kind == Some(AttachmentKind::Image) {
+                212.0_f32
+            } else {
+                0.0_f32
+            };
+            vw.max(min_att_w).min(max_text_width)
         } else {
             let has_loaded_thumb = msg
                 .link_thumb

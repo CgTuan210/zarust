@@ -63,13 +63,7 @@ impl ZaloGuiApp {
     /// the media grid keep a 480 px copy; the `hd_` key keeps this one (and its disk cache) apart.
     pub(super) fn request_hd_texture(&mut self, full_url: &str) -> Option<String> {
         let lower_u = full_url.to_lowercase();
-        let is_direct_img = lower_u.contains("zdn.vn")
-            || lower_u.ends_with(".png")
-            || lower_u.ends_with(".jpg")
-            || lower_u.ends_with(".jpeg")
-            || lower_u.ends_with(".webp")
-            || lower_u.ends_with(".gif")
-            || lower_u.ends_with(".bmp")
+        let is_direct_img = crate::chat::is_zalo_photo_cdn_url(full_url)
             || (!lower_u.starts_with("http://") && !lower_u.starts_with("https://"));
         if full_url.is_empty() || !is_direct_img {
             return None;

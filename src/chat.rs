@@ -6153,8 +6153,8 @@ pub fn is_zalo_photo_cdn_url(url: &str) -> bool {
     }
     // Direct image file extensions anywhere (kể cả jxl/heic/avif Zalo dùng, #118)
     if [
-        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".ico", ".jfif", ".tiff", ".jxl",
-        ".heic", ".heif", ".avif", ".svg",
+        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".ico", ".jfif", ".tif", ".tiff",
+        ".tga", ".qoi", ".jxl", ".heic", ".heif", ".avif", ".svg",
     ]
     .iter()
     .any(|ext| path_part.ends_with(ext))
@@ -8772,6 +8772,7 @@ pub async fn wake_phone_sync_v2(s: &Session) -> Result<String> {
     // Đúng Zalo `generateRandomString(32)`: 32 ký tự base62 (A-Za-z0-9),
     // KHÔNG phải hex. Phone/server validate format, hex bị bỏ qua.
     let sync_id = crate::param_cipher::random_base62(32);
+    crate::history_sync::set_active_v2_sync_id(Some(sync_id.clone()));
     // Sync V2 BẮT BUỘC có keypair thật từ WASM libzproto (host bằng wasmtime,
     // không cần Node.js). Fail rõ ở đây thay vì gửi request rác.
     // The loader's error already says how to fix a missing Zalo PC / WASM.
@@ -8801,12 +8802,12 @@ pub fn build_sync_v2_payload(
 
     let (req_type, queries) = if partitions.is_empty() {
         (
-            "conversation",
+            "unspecified",
             vec![json!({
-                "partition": "conversations",
+                "partition": "",
                 "from": 0,
                 "to": 9_007_199_254_740_991_i64,
-                "limit": 2000
+                "limit": 9_007_199_254_740_991_i64
             })],
         )
     } else {
@@ -8925,25 +8926,33 @@ pub async fn resolve_thread_partitions(s: &Session, threads: &[Thread]) -> Vec<S
     let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
 
     let mut partitions = Vec::new();
+    let mut noised_to_real: Vec<(String, String, bool)> = Vec::new();
     if let Some(data) = dec.get("data") {
         if let Some(arr) = data.get("fids").and_then(|v| v.as_array()) {
-            for v in arr {
+            for (fid, v) in fids.iter().zip(arr.iter()) {
                 if let Some(nid) = v.as_str() {
                     if !nid.is_empty() {
-                        partitions.push(format!("oneone/{nid}"));
+                        let part = format!("oneone/{nid}");
+                        partitions.push(part);
+                        noised_to_real.push((nid.to_string(), fid.to_string(), false));
                     }
                 }
             }
         }
         if let Some(arr) = data.get("gids").and_then(|v| v.as_array()) {
-            for v in arr {
+            for (gid, v) in gids.iter().zip(arr.iter()) {
                 if let Some(nid) = v.as_str() {
                     if !nid.is_empty() {
-                        partitions.push(format!("group/{nid}"));
+                        let part = format!("group/{nid}");
+                        partitions.push(part);
+                        noised_to_real.push((nid.to_string(), gid.to_string(), true));
                     }
                 }
             }
         }
+    }
+    if !noised_to_real.is_empty() {
+        crate::history_sync::record_sync_v2_partition_map(&noised_to_real);
     }
     partitions
 }
@@ -8955,7 +8964,7 @@ pub fn send_sync_v2_request(s: &Session, sync_id: &str) -> Result<bool> {
 }
 
 /// Gửi `cmd 590` với queries partition thật (`oneone/<globalNoisedId>` hoặc `group/<globalNoisedId>`).
-/// Kèm gửi `cmd 592` (wake up) để đánh thức client mobile.
+/// Chỉ gửi đúng `cmd 590` để mở phiên Sync V2 (không kèm `cmd 592` hay HTTP `/request-sync`).
 pub fn send_sync_v2_request_with_queries(
     s: &Session,
     sync_id: &str,
@@ -8967,14 +8976,12 @@ pub fn send_sync_v2_request_with_queries(
         sync_data.to_string().chars().take(600).collect::<String>()
     ));
     let sent_ws = crate::socket::send_sync_message_ws_request(&sync_data);
-    let sent_wake = crate::socket::send_mobile_wakeup(sync_id);
     crate::logger::log_sync(&format!(
-        "590/592 gửi: sync={} ws_590={} ws_592={}",
+        "590 gửi: sync={} ws_590={}",
         &sync_id.chars().take(8).collect::<String>(),
-        sent_ws,
-        sent_wake
+        sent_ws
     ));
-    Ok(sent_ws || sent_wake)
+    Ok(sent_ws)
 }
 
 /// Cancel an active mobile message sync request (`cancelTransferMessage` @ `app.asar:14372356`, cmd `12700`, #68).
@@ -10540,6 +10547,9 @@ mod send_identity_tests {
         ));
         assert!(is_zalo_photo_cdn_url("https://example.com/photo.heic"));
         assert!(is_zalo_photo_cdn_url("https://example.com/photo.avif"));
+        assert!(is_zalo_photo_cdn_url("https://example.com/scan.tif"));
+        assert!(is_zalo_photo_cdn_url("https://example.com/tex.tga"));
+        assert!(is_zalo_photo_cdn_url("https://example.com/icon.qoi"));
         assert!(is_zalo_photo_cdn_url(
             "https://f16-zpcloud.zdn.vn/123/jxl/abc"
         ));
@@ -10557,6 +10567,43 @@ mod send_identity_tests {
         assert!(!is_zalo_photo_cdn_url(
             "https://f16-zpc.zdn.vn/renewMedia?p=abc"
         ));
+    }
+
+    #[test]
+    fn test_image_crate_decodes_extended_preview_formats() {
+        let mut rgba = image::RgbaImage::new(2, 2);
+        for p in rgba.pixels_mut() {
+            *p = image::Rgba([20, 140, 240, 255]);
+        }
+        let dyn_img = image::DynamicImage::ImageRgba8(rgba);
+        for fmt in [
+            image::ImageFormat::Png,
+            image::ImageFormat::Jpeg,
+            image::ImageFormat::Gif,
+            image::ImageFormat::WebP,
+            image::ImageFormat::Bmp,
+            image::ImageFormat::Ico,
+            image::ImageFormat::Tiff,
+            image::ImageFormat::Tga,
+            image::ImageFormat::Qoi,
+        ] {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            let src = if matches!(fmt, image::ImageFormat::Jpeg | image::ImageFormat::Tga) {
+                image::DynamicImage::ImageRgb8(dyn_img.to_rgb8())
+            } else {
+                dyn_img.clone()
+            };
+            src.write_to(&mut buf, fmt)
+                .unwrap_or_else(|e| panic!("encode {fmt:?} failed: {e}"));
+            let decoded = if fmt == image::ImageFormat::Tga {
+                image::load_from_memory_with_format(buf.get_ref(), fmt)
+            } else {
+                image::load_from_memory(buf.get_ref())
+            }
+            .unwrap_or_else(|e| panic!("decode {fmt:?} failed: {e}"));
+            assert_eq!(decoded.width(), 2);
+            assert_eq!(decoded.height(), 2);
+        }
     }
 
     #[test]

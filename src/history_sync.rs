@@ -324,63 +324,31 @@ where
         crate::logger::log_sync(&format!("Tìm được {} partitions cho sync", partitions.len()));
 
         let v2_sync_id = match chat::wake_phone_sync_v2(s).await {
-            Ok(sync_id) => match chat::build_sync_v2_payload(s, &sync_id, &partitions) {
-                Ok(sync_data) => {
-                    // 1. Gửi HTTP request-sync (cmd 12888) lên file server để kích hoạt push notification tới phone
-                    let s_clone = s.clone();
-                    let sync_data_clone = sync_data.clone();
-                    let _sid_clone = sync_id.clone();
-                    tokio::spawn(async move {
-                        let req_id = format!("req_12888_{}", crate::login::unix_now());
-                        if let Err(e) =
-                            chat::request_phone_sync_v2_http(&s_clone, &req_id, &sync_data_clone)
-                                .await
-                        {
-                            crate::logger::log_sync(&format!("HTTP request-sync 12888 err: {e}"));
-                        } else {
-                            crate::logger::log_sync("HTTP request-sync 12888 đã gửi thành công");
-                        }
-                    });
-
-                    // 2. Gửi WS cmd 590 & cmd 592
-                    let sent_ws = crate::socket::send_sync_message_ws_request(&sync_data);
-                    let sent_wake = crate::socket::send_mobile_wakeup(&sync_id);
-                    crate::logger::log_sync(&format!(
-                        "590/592 mở session: sync={} ws_590={sent_ws} ws_592={sent_wake}",
-                        &sync_id.chars().take(8).collect::<String>()
-                    ));
-                    if sent_ws || sent_wake {
-                        Some(sync_id)
-                    } else {
-                        on_progress(
-                            0.15,
-                            "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string(),
-                        );
-                        Some(sync_id) // Vẫn giữ sync_id vì HTTP 12888 đã gửi
-                    }
+            Ok(sync_id) => match chat::send_sync_v2_request_with_queries(s, &sync_id, &partitions) {
+                Ok(true) => Some(sync_id),
+                Ok(false) => {
+                    set_active_v2_sync_id(None);
+                    on_progress(
+                        0.15,
+                        "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string(),
+                    );
+                    None
                 }
                 Err(e) => {
+                    set_active_v2_sync_id(None);
                     on_progress(0.15, format!("⚠️ Lỗi tạo gói Sync V2: {e}"));
                     set_last_phone_sync_error(Some(e.to_string()));
                     None
                 }
             },
             Err(e) => {
+                set_active_v2_sync_id(None);
                 crate::logger::log_sync(&format!("V2 mở session FAIL: {e}"));
                 on_progress(0.15, format!("⚠️ Sync V2: {e}"));
                 set_last_phone_sync_error(Some(e.to_string()));
                 None
             }
         };
-
-        // Fallback sang V1 pull_mobile_msg nếu V2 không khởi tạo được khóa
-        if v2_sync_id.is_none() {
-            let s_legacy = s.clone();
-            let pub_key_clone = pub_key.clone();
-            tokio::spawn(async move {
-                let _ = chat::request_phone_sync(&s_legacy, &pub_key_clone).await;
-            });
-        }
 
         // Chờ user xác nhận trên phone (tối đa 90s). Không gửi lại gì cả.
         // No session was opened when 590 failed, so no confirmation can arrive:
@@ -395,10 +363,19 @@ where
                     crate::socket::send_sync_ack_delete(sid, "PC_USER_CANCELS_SYNC");
                     crate::logger::log_sync("591 huỷ sync (user cancel)");
                 }
+                set_active_v2_sync_id(None);
                 return Ok((0, 0));
             }
             if let Some(st) = last_mobile_sync_status().as_deref() {
-                if st.contains("đã xác nhận")
+                let is_error = st.contains("Lỗi") || st.contains("Không thể") || st.contains("thất bại");
+                if is_error {
+                    on_progress(1.0, st.to_string());
+                    break;
+                } else if st.contains("từ chối") {
+                    rejected = true;
+                    on_progress(1.0, st.to_string());
+                    break;
+                } else if st.contains("đã xác nhận")
                     || st.contains("đang nén")
                     || st.contains("giải mã")
                     || st.contains("Đã nhận gói đồng bộ")
@@ -406,10 +383,6 @@ where
                 {
                     confirmed = true;
                     on_progress(0.40, st.to_string());
-                    break;
-                } else if st.contains("từ chối") {
-                    rejected = true;
-                    on_progress(1.0, st.to_string());
                     break;
                 } else {
                     on_progress(0.20, st.to_string());
@@ -421,6 +394,7 @@ where
             if let Some(sid) = v2_sync_id.as_deref() {
                 crate::socket::send_sync_ack_delete(sid, "USER_REJECT");
             }
+            set_active_v2_sync_id(None);
             return Ok((0, 0));
         }
 
@@ -438,7 +412,7 @@ where
                         ok = true;
                         on_progress(1.0, st.to_string());
                         break;
-                    } else if st.contains("Không thể") || st.contains("thất bại") {
+                    } else if st.contains("Lỗi") || st.contains("Không thể") || st.contains("thất bại") {
                         on_progress(1.0, st.to_string());
                         break;
                     } else {
@@ -453,10 +427,12 @@ where
                 crate::socket::send_sync_ack_delete(sid, reason);
                 crate::logger::log_sync(&format!("591 dọn session ({reason})"));
             }
+            set_active_v2_sync_id(None);
         } else if let Some(sid) = v2_sync_id.as_deref() {
             // Hết 90s không confirm → dọn session.
             crate::socket::send_sync_ack_delete(sid, "CONFIRM_TIMEOUT");
             crate::logger::log_sync("591 dọn session (CONFIRM_TIMEOUT)");
+            set_active_v2_sync_id(None);
         }
     }
     // Phase 1b: Synchronize pinned conversations from server (/api/pinconvers/list, #87)
@@ -1093,6 +1069,84 @@ fn current_v2_session() -> Result<Vec<u8>> {
 static SYNC_V2_SESSIONS: std::sync::Mutex<Vec<(String, String)>> =
     std::sync::Mutex::new(Vec::new());
 
+static ACTIVE_V2_SYNC_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_active_v2_sync_id(sync_id: Option<String>) {
+    if let Ok(mut guard) = ACTIVE_V2_SYNC_ID.lock() {
+        *guard = sync_id;
+    }
+}
+
+pub fn active_v2_sync_id() -> Option<String> {
+    ACTIVE_V2_SYNC_ID.lock().ok().and_then(|g| g.clone())
+}
+
+static SYNC_V2_BATCH_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+static PROCESSED_SYNC_V2_URLS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+static NOISED_TO_THREAD_ID: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (String, bool)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub fn sync_v2_batch_lock() -> &'static tokio::sync::Mutex<()> {
+    &SYNC_V2_BATCH_LOCK
+}
+
+/// Ghi nhận ánh xạ `noised_id` <-> `real_thread_id` trả về từ `/api/znoise`.
+pub fn record_sync_v2_partition_map(entries: &[(String, String, bool)]) {
+    if let Ok(mut map) = NOISED_TO_THREAD_ID.lock() {
+        for (noised_id, real_id, is_group) in entries {
+            let nid = noised_id.trim();
+            let rid = real_id.trim();
+            if nid.is_empty() || rid.is_empty() {
+                continue;
+            }
+            let prefix = if *is_group { "group/" } else { "oneone/" };
+            map.insert(nid.to_string(), (rid.to_string(), *is_group));
+            map.insert(format!("{prefix}{nid}"), (rid.to_string(), *is_group));
+        }
+    }
+}
+
+/// Ánh xạ `part.id` (`oneone/<noised_id>`, `group/<noised_id>`, hoặc `<noised_id>`)
+/// về `(real_thread_id, is_group_hint)`.
+pub fn map_sync_v2_partition_id(raw_part_id: &str) -> (String, Option<bool>) {
+    let trimmed = raw_part_id.trim();
+    let is_group_hint = if trimmed.starts_with("group/") {
+        Some(true)
+    } else if trimmed.starts_with("oneone/") {
+        Some(false)
+    } else {
+        None
+    };
+    let bare = trimmed
+        .strip_prefix("group/")
+        .or_else(|| trimmed.strip_prefix("oneone/"))
+        .unwrap_or(trimmed);
+    if let Ok(map) = NOISED_TO_THREAD_ID.lock() {
+        if let Some((real_id, is_grp)) = map.get(trimmed).or_else(|| map.get(bare)) {
+            return (real_id.clone(), Some(*is_grp));
+        }
+    }
+    (bare.to_string(), is_group_hint)
+}
+
+/// Kiểm tra + đánh dấu `(sync_id, batch_type, url)` đã xử lý chưa (tránh xử lý
+/// trùng giữa WebSocket và `lp_ctl`, vốn sẽ làm hỏng ratchet giải mã).
+pub fn mark_sync_v2_batch_seen(sync_id: &str, batch_type: u8, url: &str) -> bool {
+    let key = format!("{sync_id}:{batch_type}:{url}");
+    if let Ok(mut set) = PROCESSED_SYNC_V2_URLS.lock() {
+        if set.len() > 2048 {
+            set.clear();
+        }
+        return set.insert(key);
+    }
+    true
+}
+
 pub fn record_sync_v2_session(sync_id: &str, session_id: &str) {
     if let Ok(mut m) = SYNC_V2_SESSIONS.lock() {
         m.retain(|(k, _)| k != sync_id);
@@ -1439,13 +1493,40 @@ pub(crate) async fn import_sync_v2_messages_inner(
     let db_path = crate::store::db_path_for_account(&uin);
     let mut store = crate::store::MessageStore::open(&db_path)?;
     let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
+    let mut cached_threads = crate::chat::load_threads_cache();
 
     let mut imported = 0;
     for part in partitions {
-        let thread_id = part.id.clone();
+        let (mut thread_id, is_group_hint) = map_sync_v2_partition_id(&part.id);
+        let thread_known = cached_threads.iter().any(|t| t.id == thread_id);
+        if !thread_known && is_group_hint != Some(true) {
+            if let Some(peer_uid) = part.messages.iter().find_map(|m| {
+                let sid = m.sender_id.trim();
+                (!sid.is_empty() && sid != uin && sid.bytes().all(|b| b.is_ascii_digit()))
+                    .then(|| sid.to_string())
+            }) {
+                thread_id = peer_uid;
+            }
+        }
+        if !thread_id.is_empty() && !cached_threads.iter().any(|t| t.id == thread_id) {
+            let short: String = thread_id.chars().take(8).collect();
+            cached_threads.push(Thread {
+                id: thread_id.clone(),
+                name: format!("Hội thoại {short}"),
+                is_group: is_group_hint.unwrap_or(false),
+                ..Default::default()
+            });
+        }
         for m in part.messages {
             let is_outgoing = m.sender_id == uin;
             let sender_name = if is_outgoing { my_name.clone() } else { String::new() };
+            let real_sender_id = if is_outgoing {
+                uin.clone()
+            } else if !m.sender_id.trim().is_empty() {
+                m.sender_id.clone()
+            } else {
+                thread_id.clone()
+            };
             let msg_id = if !m.global_id.is_empty() && m.global_id != "0" {
                 m.global_id
             } else {
@@ -1528,7 +1609,7 @@ pub(crate) async fn import_sync_v2_messages_inner(
             let sm = crate::store::StoredMessage {
                 msg_id,
                 thread_id: thread_id.clone(),
-                sender_id: if is_outgoing { uin.clone() } else { thread_id.clone() },
+                sender_id: real_sender_id,
                 sender_name,
                 text,
                 msg_type: msg_type_str.into(),
@@ -1543,7 +1624,6 @@ pub(crate) async fn import_sync_v2_messages_inner(
         }
     }
 
-    let mut cached_threads = crate::chat::load_threads_cache();
     let _ = store.hydrate_threads(&mut cached_threads, 50);
     crate::chat::save_threads_cache(&cached_threads);
 
@@ -1703,5 +1783,37 @@ mod tests {
         // Ghi đè cùng sync_id không trùng lặp.
         record_sync_v2_session("sync-1", "sess-bbb");
         assert!(has_sync_v2_session("sync-1"));
+    }
+
+    #[test]
+    fn partition_id_mapping_resolves_noised_oneone_and_group_ids() {
+        record_sync_v2_partition_map(&[
+            ("noised_user_1".into(), "3247153953".into(), false),
+            ("noised_grp_9".into(), "9988776655".into(), true),
+        ]);
+        assert_eq!(
+            map_sync_v2_partition_id("oneone/noised_user_1"),
+            ("3247153953".into(), Some(false))
+        );
+        assert_eq!(
+            map_sync_v2_partition_id("group/noised_grp_9"),
+            ("9988776655".into(), Some(true))
+        );
+        assert_eq!(
+            map_sync_v2_partition_id("noised_grp_9"),
+            ("9988776655".into(), Some(true))
+        );
+        assert_eq!(
+            map_sync_v2_partition_id("oneone/unmapped_id"),
+            ("unmapped_id".into(), Some(false))
+        );
+    }
+
+    #[test]
+    fn sync_v2_batch_dedup_marks_each_url_once() {
+        assert!(mark_sync_v2_batch_seen("s_dedup_1", 2, "https://f.zalo.me/meta"));
+        assert!(!mark_sync_v2_batch_seen("s_dedup_1", 2, "https://f.zalo.me/meta"));
+        assert!(mark_sync_v2_batch_seen("s_dedup_1", 1, "https://f.zalo.me/msg1"));
+        assert!(!mark_sync_v2_batch_seen("s_dedup_1", 1, "https://f.zalo.me/msg1"));
     }
 }
