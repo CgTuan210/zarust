@@ -52,7 +52,7 @@ Bản Zalo PC chính thức đóng gói trên Electron thường chiếm 350–6
   - Lưu phiên tại `session.json`, tự động kiểm tra `zpw_sek` khi mở lại và chuyển về màn hình QR nếu phiên đã hết hạn trên server.
 - **Nhắn tin thời gian thực (`src/chat.rs`, `src/socket.rs`, `src/store.rs`)**
   - Kết nối WebSocket (`zpw_ws` frame binary AES-GCM/deflate) kết hợp HTTP polling dự phòng (`get_last_msgs`).
-  - Hỗ trợ chat cá nhân (1-1), nhóm (`getlg/v4`), Cloud của tôi, trả lời trích dẫn (quote), chuyển tiếp, thả cảm xúc (reaction), ghim, đánh dấu sao, thu hồi tin nhắn với mọi người và xóa phía người dùng.
+  - Hỗ trợ chat cá nhân (1-1), nhóm (`getlg/v4`), Cloud của tôi, trả lời trích dẫn (quote), chuyển tiếp, thả/gỡ cảm xúc (reaction), ghim, đánh dấu sao, thu hồi tin nhắn với mọi người và xóa phía người dùng.
   - Gửi/nhận văn bản, hình ảnh (hỗ trợ dán trực tiếp từ clipboard `Ctrl+V` / `Cmd+V`), tập tin đính kèm, nhãn dán và xem trước liên kết (OpenGraph / `parselink`).
   - Tự động phân giải tên hiển thị và avatar cho số lạ thông qua `getminiprofiles`.
 - **Gợi ý & Tìm kiếm Sticker theo ngữ cảnh (`src/chat.rs`, `src/gui/stickers.rs`)**
@@ -109,7 +109,7 @@ src/ (80,962 lines across 56 files)
 ├── socket.rs          # (624 lines)    Kết nối WebSocket thời gian thực (zpw_ws)
 ├── scheduler.rs       # (539 lines)    Bộ lập lịch gửi tin nhắn hẹn giờ & nhắc hẹn cục bộ
 ├── media_resources.rs # (447 lines)    Quản lý bộ nhớ đệm tài nguyên đa phương tiện & ảnh
-├── doc_preview.rs     # (447 lines)    Xem trước nội dung tài liệu đính kèm (PDF, DOCX/XML, ZIP)
+├── doc_preview.rs     # (Xem trước trực tiếp tài liệu PDF, Word DOC/DOCX, Excel XLS/XLSX/XLSB/ODS, PowerPoint PPT/PPTX, CSV/TSV/RTF)
 ├── group_stats.rs     # (442 lines)    Thống kê hoạt động và tương tác trong nhóm chat
 ├── qr.rs              # (436 lines)    Luồng sinh mã QR, long-polling chờ quét và xác nhận đăng nhập
 ├── data_dir.rs        # (379 lines)    Phân giải thư mục dữ liệu đa nền tảng (--data-dir / --profile)
@@ -304,13 +304,17 @@ Dự án ghi nhận các thành viên có đóng góp mã nguồn tiêu biểu t
 | **Thuong Tin** | [@thuongtin](https://github.com/thuongtin) | Loạt 10 PRs: Múi giờ OS, tùy biến data-dir, helpers macOS, session atomic, media cache, updater, message state, định danh tin nhắn (#61), điều hướng trích dẫn (#60), quyền thông báo macOS (#59) | **> 11,500+ lines** 🏆 |
 | **ngxccc** | [@ngxccc](https://github.com/ngxccc) | Loạt 5 PRs: Tiêu chuẩn kỹ thuật, bảo toàn session an toàn, phân giải domain mạng | **> 3,400+ lines** |
 | **GrootTheDeveloper** | [@GrootTheDeveloper](https://github.com/GrootTheDeveloper) | Loạt 8 PRs: Tối ưu khởi động SQLite, đồng bộ lịch sử nhóm/Cloud (#45), poll timer worker (#46), virtualization chat, lazy load Font CJK | **~950+ lines** |
-| **Tuyến Trần (gr219)** | [@gr219](https://github.com/gr219) | PR #85 (chờ sự kiện file_done trước khi gửi đính kèm), PR #99 (sửa lỗi spawn helper thông báo trên ETXTBSY) | **~350+ lines** |
+| **Tuyến Trần (gr219)** | [@gr219](https://github.com/gr219) | PR #85 (chờ sự kiện file_done), PR #99 (sửa lỗi spawn helper ETXTBSY), PR #125 (hiển thị biệt danh bạn bè), PR #145 (nạp trực tiếp Sync V2 WASM từ Zalo PC app.asar, khắc phục #147) | **~900+ lines** |
 | **Leoaxo098** | [@Leoaxo098](https://github.com/Leoaxo098) | PR #97: Khóa ô nhập liệu khi thành viên bị hạn chế quyền chat trong nhóm | **~180+ lines** |
-| **hoanglong149** | [@hoanglong149](https://github.com/hoanglong149) | PR #78 & PR #121: Đóng góp mã nguồn nghiên cứu giải mã Sync v2 di động qua WASM / Wasmtime | **~1,200+ lines** |
+| **hoanglong149** | [@hoanglong149](https://github.com/hoanglong149) | PR #78, PR #121 & PR #136: Giải mã Sync v2 di động qua WASM, chống thu hồi (#79, #141), thông báo OS, tin nhắn tự hủy, thoại & tối ưu CPU/RAM khi chờ (#135) | **> 1,300+ lines** |
+| **Đỗ Mạnh Cường (cuongdm75)** | [@cuongdm75](https://github.com/cuongdm75) | PR #105 & PR #134: Chọn thư mục tải về native, tùy chỉnh UI trực tiếp, trả lời trích dẫn (quote-reply), chuyển tiếp tin nhắn & bảo toàn URL thẻ liên kết (#88, #89) | **> 8,500+ lines** 🏆 |
+| **Trần Đức Thịnh (Fin12n)** | [@Fin12n](https://github.com/Fin12n) | PR #132 & PR #148: Thiết kế lại thẻ tập tin (file cards), sửa phát video trực tiếp, tinh chỉnh UI/UX toàn diện & giải mã Sync V2 protobuf | **> 6,500+ lines** 🏆 |
+| **Nguyễn Văn Trãi (TraiNguyenVan)** | [@TraiNguyenVan](https://github.com/TraiNguyenVan) | PR #93: Khôi phục sự kiện bộ gõ tiếng Việt IME composition trên Linux (X11/Wayland) (#86, #101, #112) | **> 2,600+ lines** |
+| **ducseul** | [@ducseul](https://github.com/ducseul) | PR #142: Menu chuyển đổi đa tài khoản (Multi-Account Switcher), thông báo nền tài khoản phụ, tách biệt media cache theo UIN, bật SQLite WAL & bảo toàn mốc đã đọc | **> 1,500+ lines** |
 > *Ghi chú: Toàn bộ danh sách vinh danh mọi cá nhân đóng góp (báo lỗi, đề xuất tính năng, pull request) được cập nhật công khai tại trang [Người đóng góp](https://ctdozlite.ctdo.net/contributors.html).*
 
 <details>
-<summary><b>👉 Nhấn vào đây để xem toàn bộ danh sách 72 người đóng góp (Community & GitHub)</b></summary>
+<summary><b>👉 Nhấn vào đây để xem toàn bộ danh sách 105 người đóng góp (Community & GitHub)</b></summary>
 
 | # | Người đóng góp | Hạng mục | Đóng góp chi tiết |
 | :---: | :--- | :--- | :--- |
@@ -386,6 +390,39 @@ Dự án ghi nhận các thành viên có đóng góp mã nguồn tiêu biểu t
 | 69 | **@vuduc810** | `GitHub Issue` | Issue #38: Đề xuất tính năng hẹn giờ gửi tin nhắn (Schedule message) tự động. |
 | 70 | **@thedtvn** | `GitHub Issue` | Issue #58: Báo cáo chi tiết lỗi Windows Defender nhận diện nhầm bộ cài setup.exe v0.0.3 là Trojan (False Positive), giúp team khắc phục triệt để trong v0.0.4. |
 | 71 | **@buildertv** | `GitHub Issue` | Issue #63: Báo cáo lỗi gộp nhầm tin nhắn và nhảy sai hội thoại khi hai tài khoản Zalo có tên hiển thị trùng nhau. |
+| 72 | **Trần Đức Thịnh (@Fin12n)** | `GitHub PRs (#132, #148)` | Đóng góp PR #132 & PR #148 (> 6,500 LoC): Thiết kế lại thẻ tập tin đính kèm, sửa phát video trực tiếp, tinh chỉnh toàn diện UI/UX và nâng cấp bộ giải mã Sync V2 protobuf. |
+| 73 | **Đỗ Mạnh Cường (@cuongdm75)** | `GitHub PRs (#105, #134)` | Đóng góp PR #105 & PR #134 (> 8,500 LoC): Hộp thoại chọn thư mục tải về native, tùy chỉnh giao diện trực tiếp, trả lời trích dẫn (quote-reply), chuyển tiếp tin nhắn/thẻ liên kết (rich link forward fallback) và đề xuất đổi font chữ giao diện (#88), sửa @mention (#89). |
+| 74 | **Nguyễn Văn Trãi (@TraiNguyenVan)** | `GitHub PR (#93)` | PR #93 (> 2,600 LoC): Khôi phục sự kiện bộ gõ tiếng Việt IME composition trên Linux (X11/Wayland), giải quyết triệt để lỗi mất dấu tiếng Việt (#86, #101, #112). |
+| 75 | **@ducseul** | `GitHub PR (#142)` | PR #142 (> 1,500 LoC): Xây dựng menu chuyển đổi đa tài khoản (Multi-Account Switcher), thông báo nền cho tài khoản phụ, tách biệt media cache theo từng UIN, bật SQLite WAL và bảo toàn mốc đã đọc. |
+| 76 | **@hoanglong149** | `GitHub PRs (#78, #121, #136)` | Đóng góp chuỗi PR #78, #121, #136 và xử lý loạt vấn đề trọng tâm: Chống thu hồi tin nhắn (#79, #141), giải mã Sync v2 di động qua WASM, thông báo OS banner, tin nhắn tự hủy (vanish), tin nhắn thoại và tối ưu hóa CPU/RAM khi chờ (#135). |
+| 77 | **@Leoaxo098** | `GitHub PR (#97)` | PR #97: Khóa thanh soạn thảo khi thành viên bị giới hạn quyền nhắn tin trong nhóm cộng đồng. |
+| 78 | **Nguyen Truong (@nguyenhoclaptrinh)** | `GitHub Issue` | Issue #147: Báo cáo chi tiết kèm log chẩn đoán lỗi đồng bộ tin nhắn từ điện thoại (Sync V2) và đồng bộ Cloud/Nhóm trên bản v0.1.1. |
+| 79 | **Tom (@vudubai-2026)** | `GitHub Issue` | Issue #146: Báo cáo lỗi thông báo tin nhắn đã đọc bị hiển thị lặp lại khi khởi động lại ứng dụng trên Arch Linux. |
+| 80 | **Lucian Duong (@Lean-Duong)** | `GitHub Issues` | Issue #130, #131, #141, #147: Đề xuất xác nhận trước khi đăng xuất & đăng nhập nhanh tài khoản đã lưu (#130), sửa lỗi phóng to/cắt xén avatar mặc định (#131), kiểm thử và cung cấp kịch bản chi tiết giúp khôi phục tính năng chống thu hồi tin nhắn Anti-Recall (#141) và đồng bộ điện thoại (#147). |
+| 81 | **@waynenguyen2212** | `GitHub Issue` | Issue #135: Báo cáo lỗi ngốn 100% CPU trên MacBook Air 2020 (Core i3), giúp team phát hiện và tối ưu hóa chu kỳ relayout/filter ở PR #136. |
+| 82 | **@Dragon-pixel-archive** | `GitHub Issue` | Issue #128: Báo cáo lỗi hiển thị và trùng lặp trạng thái khi đồng bộ tin nhắn. |
+| 83 | **@Trinity030-dev** | `GitHub Issues` | Issue #109, #117, #118, #119, #122: Chuỗi báo cáo lỗi hiển thị ảnh trong tin nhắn gửi (#118), giữ nguyên trạng thái đã đọc khi mở lại app (#119) và chặn gửi lại thông báo cũ khi khởi động (#122). |
+| 84 | **Nguyen Van Huy (@nguyenvanhuy0612)** | `GitHub Issue` | Issue #116: Phát hiện nguyên nhân lỗi đồng bộ tin nhắn điện thoại do đường dẫn WASM bị cố định trong `sync_v2_helper.js`. |
+| 85 | **lk (@lttkiet)** | `GitHub Issues` | Issue #95 & #115: Báo cáo lỗi tải nội dung tin nhắn sau đồng bộ trên openSUSE (GUI) và đồng bộ danh sách hội thoại trong chế độ TUI trên Ubuntu Server 22.04 LTS. |
+| 86 | **TìmAI (@timaivn)** | `GitHub Issue` | Issue #112: Báo cáo lỗi gõ tiếng Việt trên Debian 13 KDE Wayland. |
+| 87 | **@fouze555** | `GitHub Issue` | Issue #111: Báo cáo lỗi liên kết (URL) không hiển thị trong nội dung tin nhắn. |
+| 88 | **@clockertron** | `GitHub Issue` | Issue #108: Báo cáo lỗi đồng bộ tin nhắn trên phiên bản mới. |
+| 89 | **SRKK (@SanRocKk2005)** | `GitHub Issue` | Issue #107: Báo cáo lỗi không mở/xem được liên kết trực tiếp trên Windows 10. |
+| 90 | **@LeCmnGend** | `GitHub Issue` | Issue #106: Báo cáo lỗi không đổi được thư mục lưu dữ liệu trong phần Cài đặt. |
+| 91 | **Bùi Việt Sơn (@vietsonbui)** | `GitHub Issue` | Issue #103: Báo cáo lỗi quản lý và chuyển đổi đa tài khoản. |
+| 92 | **@UhhhhOkayyyy** | `GitHub Issues` | Issue #94 & #102: Báo cáo lỗi xem video trực tiếp trong tin nhắn, tạo nhắc hẹn (reminder), âm thanh thông báo và thả cảm xúc. |
+| 93 | **@baodinhgia2011github** | `GitHub Issue` | Issue #101: Báo cáo lỗi bộ gõ tiếng Việt trên Linux. |
+| 94 | **Lê Bá Dũng (@lebad280324)** | `GitHub Issue & PRs` | Issue #100 & PR #104, #113: Báo cáo lỗi đồng bộ tin nhắn trên macOS Apple Silicon và đóng góp thử nghiệm bản dựng macOS ARM64. |
+| 95 | **@phamducit2005-bot** | `GitHub Issues` | Issue #80 & #98: Đề xuất tính năng lưu nhanh nhiều tài khoản (#80) và hoàn thiện trả lời tin nhắn trích dẫn, thả cảm xúc, âm thanh thông báo (#98). |
+| 96 | **@Lexus101987** | `GitHub Issue` | Issue #91: Báo cáo lỗi đổi ngôn ngữ, đường dẫn thư mục tải về và đồng bộ tin nhắn. |
+| 97 | **Truong Thanh Hieu (@ubuntu2310fake)** | `GitHub Issue` | Issue #87: Báo cáo lỗi đồng bộ trạng thái ghim tin nhắn trên Zalo. |
+| 98 | **@toilinh237** | `GitHub Issue` | Issue #86: Báo cáo lỗi thiếu icon dưới thanh dock Ubuntu 26.04 và tương thích bộ gõ tiếng Việt. |
+| 99 | **@Saphira8585** | `GitHub Issue` | Issue #81: Báo cáo lỗi trạng thái gửi tin nhắn ban đầu. |
+| 100 | **Anbui (@amm119)** | `GitHub Issue` | Issue #74: Báo cáo lỗi tập tin tải về bị đổi tên mất tên gốc. |
+| 101 | **Zuqikee (@Zqw1k)** | `GitHub Issue` | Issue #68: Đề xuất tính năng đồng bộ tin nhắn trực tiếp từ điện thoại về máy tính. |
+| 102 | **@Harry-Huy** | `GitHub Issue` | Issue #67: Báo cáo lỗi trạng thái tắt thông báo (mute/unmute) chưa đồng bộ với Zalo PC chính thức. |
+| 103 | **@lhbkhanh801-a11y** | `GitHub Issue` | Issue #64: Đề xuất bổ sung cấu hình Proxy để sử dụng nhiều tài khoản Zalo trên PC. |
+| 104 | **@Kesitinh13524 & @luuquangduy-tech** | `GitHub Issue` | Issue #147: Tham gia phản hồi, cung cấp ảnh chụp màn hình và kiểm chứng lỗi đồng bộ tin nhắn từ điện thoại & Cloud. |
 
 </details>
 

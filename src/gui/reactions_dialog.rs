@@ -116,6 +116,7 @@ impl ZaloGuiApp {
         let dlg_w = (screen.width() - 24.0).clamp(240.0, 340.0);
         let dlg_h = (screen.height() - 32.0).clamp(240.0, 380.0);
         let mut open = true;
+        let mut close_dialog = false;
         let mut next_tab = tab;
         egui::Window::new("Cảm xúc")
             .open(&mut open)
@@ -155,6 +156,27 @@ impl ZaloGuiApp {
                         };
                         if ui.add(button.selected(tab == Some(kind))).clicked() {
                             next_tab = Some(kind);
+                        }
+                    }
+                    if total > 0 {
+                        let clear_btn = ui.add(
+                            egui::Button::new(
+                                RichText::new("✕ Bỏ thả cảm xúc")
+                                    .size(12.0)
+                                    .color(pal.danger_text),
+                            ),
+                        );
+                        if clear_btn.clicked() {
+                            self.status_msg = "Đang bỏ thả cảm xúc…".into();
+                            if let Some(tx) = WORKER_TX.get() {
+                                let _ = tx.send(WorkerCmd::React {
+                                    to_id: thread_id.clone(),
+                                    is_group: self.threads[thread_idx].is_group,
+                                    msg: msg.clone(),
+                                    reaction: crate::chat::CLEAR_REACTION_CODE.to_string(),
+                                });
+                            }
+                            close_dialog = true;
                         }
                     }
                 });
@@ -239,7 +261,7 @@ impl ZaloGuiApp {
                     });
             });
         self.reactions_tab = next_tab;
-        if !open {
+        if !open || close_dialog {
             self.reactions_dialog = None;
         }
     }

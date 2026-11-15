@@ -3291,10 +3291,66 @@ impl ZaloGuiApp {
                     }
                     self.status_msg = format!("Đã gửi trả lời lúc {}", crate::ui::clock());
                 }
-                GuiEvent::Reacted { .. } => {
-                    // Counts come only from the `chat.reaction` echo (ReactionEventsReceived);
-                    // adding here as well double-counted every click.
-                    self.status_msg = "Đã thả cảm xúc".into();
+                GuiEvent::Reacted {
+                    thread_id,
+                    msg_id,
+                    ts,
+                    reaction,
+                } => {
+                    if crate::chat::is_clear_reaction(&reaction) {
+                        let now_ms = crate::login::unix_now();
+                        let mut target_client_id = String::new();
+                        if let Some(t) = self.threads.iter().find(|t| t.id == thread_id) {
+                            if let Some(m) = t.messages.iter().find(|m| {
+                                (!msg_id.is_empty() && m.id == msg_id)
+                                    || (ts > 0 && m.ts == ts)
+                            }) {
+                                target_client_id = m.client_message_id.clone();
+                            }
+                        }
+                        let mut clear_evs = vec![crate::reactions::ReactionEvent {
+                            message_id: msg_id.clone(),
+                            client_message_id: target_client_id.clone(),
+                            thread_id: thread_id.clone(),
+                            sender_id: "0".into(),
+                            r_type: -1,
+                            ts: now_ms,
+                            ..Default::default()
+                        }];
+                        if !self.user_uin.is_empty() && self.user_uin != "0" {
+                            clear_evs.push(crate::reactions::ReactionEvent {
+                                message_id: msg_id.clone(),
+                                client_message_id: target_client_id,
+                                thread_id: thread_id.clone(),
+                                sender_id: self.user_uin.clone(),
+                                r_type: -1,
+                                ts: now_ms,
+                                ..Default::default()
+                            });
+                        }
+                        self.reaction_inbox.record_new(&clear_evs);
+                        let mut changed = false;
+                        if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                            changed |= self.reaction_inbox.apply_to(&mut t.messages);
+                            for m in t.messages.iter_mut() {
+                                if (!msg_id.is_empty() && m.id == msg_id)
+                                    || (ts > 0 && m.ts == ts)
+                                {
+                                    for ev in &clear_evs {
+                                        changed |= m.apply_reaction(ev);
+                                    }
+                                }
+                            }
+                        }
+                        if changed {
+                            self.persist_threads_async();
+                        }
+                        self.status_msg = "Đã thu hồi cảm xúc".into();
+                    } else {
+                        // Counts come only from the `chat.reaction` echo (ReactionEventsReceived);
+                        // adding here as well double-counted every click.
+                        self.status_msg = "Đã thả cảm xúc".into();
+                    }
                 }
                 GuiEvent::ReactionEventsReceived(events) => {
                     // Count/banner ONLY newly accepted events (replays ignored) and

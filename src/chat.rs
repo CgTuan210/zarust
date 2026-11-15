@@ -4540,9 +4540,13 @@ pub fn icon_to_emoji(icon: &str) -> &'static str {
     }
 }
 
+/// Special reaction code sent to clear all of our own reactions on a message (`rType = -1`, `rIcon = ""`).
+pub const CLEAR_REACTION_CODE: &str = "/-remove";
+
 /// Map a visual reaction emoji or Zalo reaction code to `(rIcon, rType)` (`compact-app-pc.js:10848900`).
 pub fn reaction_code_and_type(emoji_or_code: &str) -> (&'static str, i32) {
-    match emoji_or_code {
+    match emoji_or_code.trim() {
+        "" | "/-remove" | "clear" | "none" => ("", -1),
         "👍" | "/-strong" => ("/-strong", 3),
         "❤️" | "❤" | "/-heart" => ("/-heart", 5),
         "😆" | ":>" => (":>", 0),
@@ -4551,6 +4555,11 @@ pub fn reaction_code_and_type(emoji_or_code: &str) -> (&'static str, i32) {
         "😠" | ":-h" => (":-h", 20),
         _ => ("/-heart", 5),
     }
+}
+
+/// Returns `true` when `emoji_or_code` requests clearing/removing reactions (`rType == -1`).
+pub fn is_clear_reaction(emoji_or_code: &str) -> bool {
+    reaction_code_and_type(emoji_or_code).1 == -1
 }
 
 /// Send a message reaction (`sendReactionMessage` in `compact-app-pc.b7bec208c4c8f73e09f8.js:14317097`, cmd `12410` / `12411`).

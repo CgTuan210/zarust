@@ -2955,7 +2955,28 @@ pub(super) fn previewable_ext(file_name: &str) -> bool {
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str(),
-        "pdf" | "docx" | "xlsx" | "pptx" | "txt" | "csv" | "md" | "log" | "rtf"
+        "pdf"
+            | "doc"
+            | "docx"
+            | "xls"
+            | "xlsx"
+            | "xlsm"
+            | "xlsb"
+            | "ods"
+            | "ppt"
+            | "pptx"
+            | "txt"
+            | "csv"
+            | "tsv"
+            | "md"
+            | "log"
+            | "json"
+            | "xml"
+            | "yaml"
+            | "yml"
+            | "ini"
+            | "toml"
+            | "rtf"
     )
 }
 
@@ -4101,8 +4122,9 @@ pub(super) fn bubble_context_menu(
     let mut action = None;
     let mut close_menu = false;
 
+    let has_reactions = !msg.reaction_summaries.is_empty() || !msg.reactions.is_empty();
     let screen = ui.ctx().screen_rect();
-    let menu_w = 180.0_f32;
+    let menu_w = if has_reactions { 208.0_f32 } else { 180.0_f32 };
     let menu_h = 280.0_f32;
     let pos = Pos2::new(
         menu_pos.x.clamp(
@@ -4143,7 +4165,7 @@ pub(super) fn bubble_context_menu(
                         msg.text.trim() == crate::chat::VANISH_EXPIRED_TEXT;
                     // 0. Hàng emoji thả cảm xúc (giống Zalo gốc khi chuột phải)
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
+                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
                         for &(code, key, tooltip) in &REACTION_LIST {
                             let btn_resp = if let Some(tex) = emoji_textures.get(key) {
                                 let img =
@@ -4163,8 +4185,33 @@ pub(super) fn bubble_context_menu(
                                 close_menu = true;
                             }
                         }
+                        if has_reactions {
+                            let clear_resp = ui.add(
+                                egui::Button::new(
+                                    RichText::new("✕").size(13.0).color(pal.text_muted),
+                                )
+                                .fill(Color32::TRANSPARENT)
+                                .min_size(Vec2::splat(20.0))
+                                .rounding(Rounding::same(4.0)),
+                            );
+                            let clear_clicked = clear_resp.clicked();
+                            clear_resp.on_hover_text("Bỏ thả cảm xúc");
+                            if clear_clicked {
+                                action = Some(BubbleAction::React(
+                                    crate::chat::CLEAR_REACTION_CODE,
+                                ));
+                                close_menu = true;
+                            }
+                        }
                     });
                     ui.separator();
+                    if has_reactions
+                        && !vanished
+                        && menu_item(ui, "✕", "Bỏ thả cảm xúc", pal.danger_text).clicked()
+                    {
+                        action = Some(BubbleAction::React(crate::chat::CLEAR_REACTION_CODE));
+                        close_menu = true;
+                    }
                     // 1. Trả lời (Quote)
                     if !vanished
                         && menu_item(ui, lucide::QUOTE, "Trả lời", pal.text_primary).clicked()
@@ -4526,7 +4573,8 @@ pub(super) fn render_hover_reaction_bar(
         return None;
     }
 
-    let bar_w = 236.0_f32;
+    let has_reactions = !msg.reaction_summaries.is_empty() || !msg.reactions.is_empty();
+    let bar_w = if has_reactions { 262.0_f32 } else { 236.0_f32 };
     let bar_h = 32.0_f32;
 
     let clip_right = ui.clip_rect().right();
@@ -4648,6 +4696,23 @@ pub(super) fn render_hover_reaction_bar(
                             btn_resp.on_hover_text(tooltip);
                             if clicked {
                                 action = Some(BubbleAction::React(code));
+                            }
+                        }
+
+                        if has_reactions {
+                            let clear_btn = egui::Button::new(
+                                RichText::new("✕").size(13.5).color(pal.text_muted),
+                            )
+                            .fill(Color32::TRANSPARENT)
+                            .min_size(Vec2::splat(22.0))
+                            .rounding(Rounding::same(6.0));
+                            let clear_resp = ui.add(clear_btn);
+                            let clear_clicked = clear_resp.clicked();
+                            clear_resp.on_hover_text("Bỏ thả cảm xúc");
+                            if clear_clicked {
+                                action = Some(BubbleAction::React(
+                                    crate::chat::CLEAR_REACTION_CODE,
+                                ));
                             }
                         }
 
@@ -4823,6 +4888,8 @@ pub(super) fn render_reactions(
                 );
                 if pill_resp.clicked() {
                     action = Some(BubbleAction::ShowReactions);
+                } else if pill_resp.secondary_clicked() {
+                    action = Some(BubbleAction::React(crate::chat::CLEAR_REACTION_CODE));
                 }
                 pill_resp
                     .on_hover_cursor(CursorIcon::PointingHand)

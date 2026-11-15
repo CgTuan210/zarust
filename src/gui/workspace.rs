@@ -6999,7 +6999,11 @@ impl ZaloGuiApp {
                                     // The count is never edited locally: the server echoes our own
                                     // reaction back as a `chat.reaction` event, which is the only
                                     // thing that updates the ledger (deduplicated by event id).
-                                    self.status_msg = format!("Đã gửi cảm xúc {r}");
+                                    self.status_msg = if crate::chat::is_clear_reaction(r) {
+                                        "Đang bỏ thả cảm xúc…".into()
+                                    } else {
+                                        format!("Đã gửi cảm xúc {r}")
+                                    };
                                     if let Some(tx) = WORKER_TX.get() {
                                         let _ = tx.send(WorkerCmd::React {
                                             to_id: thread_id.clone(),
