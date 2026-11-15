@@ -1258,6 +1258,13 @@ struct AppSettings {
     // 10. Proxy & Đa tài khoản (#64)
     proxy_url: String,
     multi_profile_name: String,
+    /// LLM endpoint (OpenAI-compatible). Trống = resolve từ opencode.json / Ollama local.
+    #[serde(default)]
+    llm_base_url: String,
+    #[serde(default)]
+    llm_api_key: String,
+    #[serde(default)]
+    llm_model: String,
     info_drawer_open: bool,
 }
 
@@ -1332,6 +1339,9 @@ impl Default for AppSettings {
             skipped_update_version: String::new(),
             proxy_url: String::new(),
             multi_profile_name: "acc2".into(),
+            llm_base_url: String::new(),
+            llm_api_key: String::new(),
+            llm_model: String::new(),
             info_drawer_open: false,
         }
     }
@@ -1486,6 +1496,9 @@ pub struct ZaloGuiApp {
     /// Sidebar list cache (query, filter, len, fingerprint, selected, indices, at).
     /// Avoids re-filter+sort (~1300 threads) every repaint (#135).
     thread_list_cache: crate::gui::workspace::ThreadListCache,
+    /// LLM connection test result (transient, not persisted).
+    llm_test_result: Option<String>,
+    llm_test_pending: bool,
     profile_menu_open: bool,
     /// "Xoá dữ liệu tin nhắn cục bộ" is pending confirmation (#21).
     wipe_confirm_open: bool,
@@ -1868,6 +1881,8 @@ impl ZaloGuiApp {
             status_msg: "Trực tuyến · Sẵn sàng".into(),
             info_drawer_open: loaded_settings.info_drawer_open,
             thread_list_cache: None,
+            llm_test_result: None,
+            llm_test_pending: false,
             profile_menu_open: false,
             wipe_confirm_open: false,
             logout_confirm_open: false,
