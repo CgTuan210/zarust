@@ -8902,7 +8902,7 @@ pub fn build_sync_v2_payload(
     sync_id: &str,
     partitions: &[String],
 ) -> Result<serde_json::Value> {
-    let temp_key = String::new();
+    let temp_key = crate::history_sync::latest_mobile_temp_key();
     let keys = crate::history_sync::current_v2_keys()
         .map_err(|_| anyhow::anyhow!("chưa có khóa Sync V2 — gọi wake_phone_sync_v2 trước"))?;
     let (ik_pub, ek_pub) = (keys.ik_pub, keys.ek_pub);
@@ -9185,6 +9185,14 @@ pub fn send_sync_v2_request_with_queries(
         sync_data.to_string().chars().take(600).collect::<String>()
     ));
     let sent_ws = crate::socket::send_sync_message_ws_request(&sync_data);
+    let s_clone = s.clone();
+    let sync_data_clone = sync_data.clone();
+    let sync_id_str = sync_id.to_string();
+    tokio::spawn(async move {
+        if let Ok(resp) = request_phone_sync_v2_http(&s_clone, &sync_id_str, &sync_data_clone).await {
+            crate::logger::log_sync(&format!("12888 http request-sync: {resp:?}"));
+        }
+    });
     crate::logger::log_sync(&format!(
         "590 gửi: sync={} ws_590={}",
         &sync_id.chars().take(8).collect::<String>(),

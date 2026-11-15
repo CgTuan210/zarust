@@ -2393,10 +2393,17 @@ impl ZaloGuiApp {
                                                             } else {
                                                                 0.05
                                                             };
+                                                            let pct = (safe_prog * 100.0).round() as u32;
                                                             ui.add(
                                                                 egui::ProgressBar::new(safe_prog)
-                                                                .text(&self.phone_sync_status)
-                                                                .animate(true),
+                                                                    .text(format!("{pct}%"))
+                                                                    .animate(true),
+                                                            );
+                                                            ui.add_space(6.0);
+                                                            ui.label(
+                                                                RichText::new(&self.phone_sync_status)
+                                                                    .color(pal.text_primary)
+                                                                    .size(12.5),
                                                             );
                                                             ui.add_space(6.0);
                                                             if ui
