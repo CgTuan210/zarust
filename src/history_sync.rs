@@ -32,38 +32,108 @@ pub static PHONE_SYNC_CANCEL: AtomicBool = AtomicBool::new(false);
 /// True while a phone message sync (`sync_phone_messages`) is active (#68).
 pub static PHONE_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 
+async fn persist_thread_snapshot(db_path: &str, snapshot: Thread) -> Result<usize> {
+    let acc_db = db_path.to_string();
+    tokio::task::spawn_blocking(move || {
+        let n = store::persist_threads(
+            &mut MessageStore::open(&acc_db)?,
+            std::slice::from_ref(&snapshot),
+        )?;
+        if acc_db != DB_PATH {
+            if let Ok(mut fallback) = MessageStore::open(DB_PATH) {
+                let _ = store::persist_threads(&mut fallback, std::slice::from_ref(&snapshot));
+            }
+        }
+        Ok(n)
+    })
+    .await?
+}
+
 /// Fetch older pages for `t` until the server has nothing older, `MAX_PAGES` is hit, or the user
 /// cancels. Each page is committed immediately so a crash or cancel loses nothing. SQLite work
 /// runs on the blocking pool; no connection is held across an await.
 /// Returns how many messages were new to the database.
 pub async fn sync_thread(s: &Session, t: &mut Thread) -> Result<usize> {
     let id = t.id.clone();
-    let mut cursor =
-        tokio::task::spawn_blocking(move || MessageStore::open(DB_PATH).ok()?.oldest_msg_id(&id))
-            .await?
-            .unwrap_or_default();
+    let uin = s
+        .login
+        .as_ref()
+        .map(|l| l.uin.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let db_path = store::db_path_for_account(&uin);
+
+    let db_for_load = db_path.clone();
+    let id_for_load = id.clone();
+    let mut loaded_vec = vec![t.clone()];
+    let (loaded_thread, oldest_db) = tokio::task::spawn_blocking(move || {
+        store::load_history_into_threads(&db_for_load, &mut loaded_vec, 1000);
+        let oldest = MessageStore::open(&db_for_load)
+            .ok()
+            .and_then(|st| st.oldest_msg_id(&id_for_load));
+        let loaded = loaded_vec.into_iter().next().unwrap_or_default();
+        (loaded, oldest)
+    })
+    .await?;
+    *t = loaded_thread;
+
     let mut added = 0;
+    let mut is_old = false;
+    let mut cursor = oldest_db.unwrap_or_default();
+
+    if t.messages.is_empty() {
+        let resp = match chat::get_cloud_messages(s, &t.id, "0", false, PAGE).await {
+            Ok(r) => r,
+            Err(e) if chat::is_cloud_stop_retry(&e) => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let before = t.messages.len();
+        chat::merge_group_history(t, &resp);
+        if t.messages.len() > before {
+            added += persist_thread_snapshot(&db_path, t.clone()).await?;
+        }
+        let (has_more, next_is_old, resp_cursor) = chat::parse_cloud_page_meta(&resp);
+        if !has_more {
+            return Ok(added);
+        }
+        is_old = next_is_old;
+        match resp_cursor.or_else(|| next_cursor(t, "")) {
+            Some(c) => cursor = c,
+            None => return Ok(added),
+        }
+        tokio::time::sleep(PAUSE).await;
+    } else if cursor.is_empty() {
+        cursor = next_cursor(t, "").unwrap_or_else(|| "0".to_string());
+    }
+
     for _ in 0..MAX_PAGES {
         if CANCEL.load(Ordering::Relaxed) {
             break;
         }
-        let resp = chat::get_cloud_messages(s, &t.id, &cursor, true, PAGE).await?;
+        let resp = match chat::get_cloud_messages(s, &t.id, &cursor, is_old, PAGE).await {
+            Ok(r) => r,
+            Err(e) if chat::is_cloud_stop_retry(&e) => break,
+            Err(e) => return Err(e),
+        };
+        let (has_more, next_is_old, resp_cursor) = chat::parse_cloud_page_meta(&resp);
         let before = t.messages.len();
         chat::merge_group_history(t, &resp);
-        if t.messages.len() == before {
-            break; // nothing older on the server
+        if t.messages.len() > before {
+            added += persist_thread_snapshot(&db_path, t.clone()).await?;
         }
-        let snapshot = t.clone();
-        added += tokio::task::spawn_blocking(move || {
-            store::persist_threads(
-                &mut MessageStore::open(DB_PATH)?,
-                std::slice::from_ref(&snapshot),
-            )
-        })
-        .await??;
-        match next_cursor(t, &cursor) {
-            Some(c) => cursor = c,
-            None => break,
+        if t.messages.len() == before && !is_old && next_is_old && has_more {
+            // Server signaled cold-storage pagination (`isOld = 1`) for this cursor; retry page once via getoldv2.
+            is_old = true;
+            tokio::time::sleep(PAUSE).await;
+            continue;
+        }
+        is_old = next_is_old;
+        if !has_more || t.messages.len() == before {
+            break;
+        }
+        match resp_cursor.or_else(|| next_cursor(t, &cursor)) {
+            Some(c) if c != cursor => cursor = c,
+            _ => break,
         }
         tokio::time::sleep(PAUSE).await;
     }
@@ -105,6 +175,20 @@ pub fn set_last_mobile_sync_status(status: Option<String>) {
     if let Ok(mut g) = LAST_MOBILE_SYNC_STATUS.lock() {
         *g = status;
     }
+}
+
+static LAST_PHONE_SYNC_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn set_last_phone_sync_error(error: Option<String>) {
+    if let Ok(mut g) = LAST_PHONE_SYNC_ERROR.lock() {
+        *g = error;
+    }
+}
+
+/// Why the phone (Sync V2) step of the last `sync_phone_messages` run could not start,
+/// e.g. no Zalo PC WASM on this machine. `None` when it started or was not attempted.
+pub fn last_phone_sync_error() -> Option<String> {
+    LAST_PHONE_SYNC_ERROR.lock().ok().and_then(|g| g.clone())
 }
 
 /// Read the latest status returned by the user's phone during `sync_phone_messages`.
@@ -223,6 +307,7 @@ where
 
     if send_phone_prompt {
         set_last_mobile_sync_status(None);
+        set_last_phone_sync_error(None);
 
         // Phase 1 — Sync V2 đúng Zalo PC (`shared-worker.js` SyncSession.start):
         // 590 là message mạng ĐẦU TIÊN (mở session, phone hiện màn xác nhận).
@@ -235,30 +320,73 @@ where
             0.10,
             "📲 Đang gửi yêu cầu đồng bộ tới Zalo trên điện thoại (hãy mở Zalo trên điện thoại và bấm 'Đồng bộ ngay')…".to_string(),
         );
+        let partitions = chat::resolve_thread_partitions(s, threads).await;
+        crate::logger::log_sync(&format!("Tìm được {} partitions cho sync", partitions.len()));
+
         let v2_sync_id = match chat::wake_phone_sync_v2(s).await {
-            Ok(sync_id) => match chat::send_sync_v2_request(s, &sync_id) {
-                Ok(true) => {
-                    crate::logger::log_sync(&format!("590 mở session: sync={}", &sync_id.chars().take(8).collect::<String>()));
-                    Some(sync_id)
-                }
-                Ok(false) => {
-                    on_progress(0.15, "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string());
-                    None
+            Ok(sync_id) => match chat::build_sync_v2_payload(s, &sync_id, &partitions) {
+                Ok(sync_data) => {
+                    // 1. Gửi HTTP request-sync (cmd 12888) lên file server để kích hoạt push notification tới phone
+                    let s_clone = s.clone();
+                    let sync_data_clone = sync_data.clone();
+                    let _sid_clone = sync_id.clone();
+                    tokio::spawn(async move {
+                        let req_id = format!("req_12888_{}", crate::login::unix_now());
+                        if let Err(e) =
+                            chat::request_phone_sync_v2_http(&s_clone, &req_id, &sync_data_clone)
+                                .await
+                        {
+                            crate::logger::log_sync(&format!("HTTP request-sync 12888 err: {e}"));
+                        } else {
+                            crate::logger::log_sync("HTTP request-sync 12888 đã gửi thành công");
+                        }
+                    });
+
+                    // 2. Gửi WS cmd 590 & cmd 592
+                    let sent_ws = crate::socket::send_sync_message_ws_request(&sync_data);
+                    let sent_wake = crate::socket::send_mobile_wakeup(&sync_id);
+                    crate::logger::log_sync(&format!(
+                        "590/592 mở session: sync={} ws_590={sent_ws} ws_592={sent_wake}",
+                        &sync_id.chars().take(8).collect::<String>()
+                    ));
+                    if sent_ws || sent_wake {
+                        Some(sync_id)
+                    } else {
+                        on_progress(
+                            0.15,
+                            "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string(),
+                        );
+                        Some(sync_id) // Vẫn giữ sync_id vì HTTP 12888 đã gửi
+                    }
                 }
                 Err(e) => {
-                    on_progress(0.15, format!("⚠️ Sync V2: {e}"));
+                    on_progress(0.15, format!("⚠️ Lỗi tạo gói Sync V2: {e}"));
+                    set_last_phone_sync_error(Some(e.to_string()));
                     None
                 }
             },
             Err(e) => {
                 crate::logger::log_sync(&format!("V2 mở session FAIL: {e}"));
                 on_progress(0.15, format!("⚠️ Sync V2: {e}"));
+                set_last_phone_sync_error(Some(e.to_string()));
                 None
             }
         };
 
+        // Fallback sang V1 pull_mobile_msg nếu V2 không khởi tạo được khóa
+        if v2_sync_id.is_none() {
+            let s_legacy = s.clone();
+            let pub_key_clone = pub_key.clone();
+            tokio::spawn(async move {
+                let _ = chat::request_phone_sync(&s_legacy, &pub_key_clone).await;
+            });
+        }
+
         // Chờ user xác nhận trên phone (tối đa 90s). Không gửi lại gì cả.
-        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        // No session was opened when 590 failed, so no confirmation can arrive:
+        // skip straight to the server/Cloud phases instead of idling for 90s.
+        let confirm_window = if v2_sync_id.is_some() { Duration::from_secs(90) } else { Duration::ZERO };
+        let deadline = std::time::Instant::now() + confirm_window;
         let mut confirmed = false;
         let mut rejected = false;
         while std::time::Instant::now() < deadline {
@@ -459,10 +587,15 @@ where
         );
         if let Ok(cm_resp) = chat::get_cloud_messages(s, &tid, "0", false, PAGE).await {
             chat::merge_group_history(&mut threads[tidx], &cm_resp);
-        }
-        if let Some(oldest) = next_cursor(&threads[tidx], "") {
-            if let Ok(old_resp) = chat::get_cloud_messages(s, &tid, &oldest, true, PAGE).await {
-                chat::merge_group_history(&mut threads[tidx], &old_resp);
+            let (has_more, is_old, last_msg_id) = chat::parse_cloud_page_meta(&cm_resp);
+            if has_more {
+                if let Some(oldest) = last_msg_id.or_else(|| next_cursor(&threads[tidx], "")) {
+                    if let Ok(old_resp) =
+                        chat::get_cloud_messages(s, &tid, &oldest, is_old, PAGE).await
+                    {
+                        chat::merge_group_history(&mut threads[tidx], &old_resp);
+                    }
+                }
             }
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -980,6 +1113,18 @@ pub fn remove_sync_v2_session(sync_id: &str) {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct ParsedProtoAttach {
+    pub attach_type: Option<String>,
+    pub params: Option<String>,
+    pub title: Option<String>,
+    pub href: Option<String>,
+    pub thumb: Option<String>,
+    pub description: Option<String>,
+    pub cat_id: Option<i32>,
+    pub id: Option<i32>,
+}
+
 #[derive(Debug, Default)]
 pub struct ParsedProtoMsg {
     pub sender_id: String,
@@ -989,6 +1134,7 @@ pub struct ParsedProtoMsg {
     pub timestamp: u64,
     pub global_id: String,
     pub content: String,
+    pub attaches: Vec<ParsedProtoAttach>,
 }
 
 #[derive(Debug, Default)]
@@ -1011,6 +1157,82 @@ fn parse_vli(buf: &[u8], mut offset: usize) -> Option<(u64, usize)> {
         if shift >= 64 { return None; }
     }
     None
+}
+
+fn parse_proto_attach(buf: &[u8]) -> Option<ParsedProtoAttach> {
+    let mut att = ParsedProtoAttach::default();
+    let mut offset = 0;
+    while offset < buf.len() {
+        let (tag, next) = parse_vli(buf, offset)?;
+        offset = next;
+        let field_num = tag >> 3;
+        let wire_type = tag & 0x07;
+        match wire_type {
+            0 => {
+                let (val, next) = parse_vli(buf, offset)?;
+                offset = next;
+                match field_num {
+                    9 => att.cat_id = Some(val as i32),
+                    10 => att.id = Some(val as i32),
+                    _ => {}
+                }
+            }
+            2 => {
+                let (len, next) = parse_vli(buf, offset)?;
+                offset = next;
+                let len = len as usize;
+                if offset + len > buf.len() { return None; }
+                let s = String::from_utf8_lossy(&buf[offset..offset + len]).into_owned();
+                offset += len;
+                match field_num {
+                    1 => att.attach_type = Some(s),
+                    4 => att.params = Some(s),
+                    5 => att.title = Some(s),
+                    6 => att.href = Some(s),
+                    7 => att.thumb = Some(s),
+                    8 => att.description = Some(s),
+                    _ => {}
+                }
+            }
+            1 => offset += 8,
+            5 => offset += 4,
+            _ => return None,
+        }
+    }
+    Some(att)
+}
+
+fn parse_proto_metadata(buf: &[u8]) -> Option<Vec<ParsedProtoAttach>> {
+    let mut attaches = Vec::new();
+    let mut offset = 0;
+    while offset < buf.len() {
+        let (tag, next) = parse_vli(buf, offset)?;
+        offset = next;
+        let field_num = tag >> 3;
+        let wire_type = tag & 0x07;
+        match wire_type {
+            0 => {
+                let (_, next) = parse_vli(buf, offset)?;
+                offset = next;
+            }
+            2 => {
+                let (len, next) = parse_vli(buf, offset)?;
+                offset = next;
+                let len = len as usize;
+                if offset + len > buf.len() { return None; }
+                if field_num == 1 {
+                    if let Some(att) = parse_proto_attach(&buf[offset..offset + len]) {
+                        attaches.push(att);
+                    }
+                }
+                offset += len;
+            }
+            1 => offset += 8,
+            5 => offset += 4,
+            _ => return None,
+        }
+    }
+    Some(attaches)
 }
 
 fn parse_message(buf: &[u8]) -> Option<ParsedProtoMsg> {
@@ -1044,6 +1266,11 @@ fn parse_message(buf: &[u8]) -> Option<ParsedProtoMsg> {
                     1 => msg.sender_id = String::from_utf8_lossy(bytes).into_owned(),
                     6 => msg.global_id = String::from_utf8_lossy(bytes).into_owned(),
                     7 => msg.content = String::from_utf8_lossy(bytes).into_owned(),
+                    8 => {
+                        if let Some(atts) = parse_proto_metadata(bytes) {
+                            msg.attaches.extend(atts);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1225,16 +1452,89 @@ pub(crate) async fn import_sync_v2_messages_inner(
                 m.client_id.to_string()
             };
 
+            // Map numeric msg_type from protobuf into Zalo string msg_type:
+            // 1: text, 2/11: photo, 3: voice, 4/5/13: sticker, 18: video, 19: file, 20/31: undo
+            let msg_type_str = match m.msg_type {
+                1 => "chat.text",
+                2 | 11 => "chat.photo",
+                3 => "chat.voice",
+                4 | 5 | 13 => "chat.sticker",
+                18 => "chat.video.msg",
+                19 => "chat.file",
+                20 | 31 => "chat.undo",
+                _ => "chat.text",
+            };
+
+            let mut text = m.content;
+            let mut raw_meta = serde_json::Map::new();
+
+            if let Some(att) = m.attaches.into_iter().next() {
+                if let Some(href) = att.href.filter(|h| !h.is_empty()) {
+                    raw_meta.insert("link_url".into(), serde_json::json!(href));
+                }
+                if let Some(title) = att.title.filter(|t| !t.is_empty()) {
+                    raw_meta.insert("link_title".into(), serde_json::json!(title));
+                }
+                if let Some(thumb) = att.thumb.filter(|t| !t.is_empty()) {
+                    raw_meta.insert("link_thumb".into(), serde_json::json!(thumb));
+                }
+                if let Some(desc) = att.description.filter(|d| !d.is_empty()) {
+                    raw_meta.insert("link_desc".into(), serde_json::json!(desc));
+                }
+                if let Some(sid) = att.id {
+                    raw_meta.insert("stickerId".into(), serde_json::json!(sid));
+                    if let Some(cid) = att.cat_id {
+                        raw_meta.insert("cateId".into(), serde_json::json!(cid));
+                    }
+                }
+            }
+
+            let is_video = m.msg_type == 18
+                || raw_meta
+                    .get("link_url")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|u| {
+                        let l = u.to_ascii_lowercase();
+                        l.contains("video-") || l.contains(".dlmd.me") || l.ends_with(".mp4")
+                    });
+
+            if is_video {
+                raw_meta.insert("link_src".into(), serde_json::json!("Video Zalo"));
+                raw_meta.insert("link_title".into(), serde_json::json!("Video"));
+                text = "[Video]".into();
+            } else if m.msg_type == 2 || m.msg_type == 11 {
+                raw_meta.insert("link_src".into(), serde_json::json!("Hình ảnh Zalo"));
+                if text.is_empty() || (text.len() > 20 && !text.contains(' ')) {
+                    text = "[Hình ảnh]".into();
+                }
+            } else if m.msg_type == 19 {
+                raw_meta.insert("link_src".into(), serde_json::json!("Tập tin Zalo"));
+                let title = raw_meta
+                    .get("link_title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&text);
+                text = format!("[Tập tin] {title}");
+            } else if m.msg_type == 3 {
+                raw_meta.insert("link_src".into(), serde_json::json!("Thoại Zalo"));
+                text = "[Tin nhắn thoại]".into();
+            }
+
+            let raw_json = if raw_meta.is_empty() {
+                String::new()
+            } else {
+                serde_json::Value::Object(raw_meta).to_string()
+            };
+
             let sm = crate::store::StoredMessage {
                 msg_id,
                 thread_id: thread_id.clone(),
                 sender_id: if is_outgoing { uin.clone() } else { thread_id.clone() },
                 sender_name,
-                text: m.content,
-                msg_type: "webchat".into(),
+                text,
+                msg_type: msg_type_str.into(),
                 ts: m.timestamp as i64,
                 is_outgoing,
-                raw_json: String::new(),
+                raw_json,
             };
 
             if store.upsert_message(&sm).unwrap_or(false) {

@@ -208,7 +208,20 @@ impl MessageStore {
         } else {
             Connection::open(path)?
         };
+        Self::configure_connection(&conn);
         Ok(Self { conn })
+    }
+
+    /// Apply the per-connection settings from `docs/standards/database-and-migrations.md`.
+    ///
+    /// WAL lets the UI read while the worker commits a large history batch; in
+    /// rollback-journal mode those reads waited out the full busy timeout and froze
+    /// the window for seconds at a time during a first sync.
+    fn configure_connection(conn: &Connection) {
+        // Best effort: switching the journal needs a lock another writer may hold, and
+        // the mode is persistent, so a later open applies it. `:memory:` stays "memory".
+        let _ = conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
     }
 
      /// Open SQLite database at `path` and initialize table schemas and indices if absent.
@@ -218,6 +231,7 @@ impl MessageStore {
         } else {
             Connection::open(path)?
         };
+        Self::configure_connection(&conn);
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -1164,20 +1178,77 @@ impl MessageStore {
                 msg.raw_json,
             ],
         )?;
-        let is_tombstone = msg.raw_json.is_empty()
-            && msg.text.trim() == crate::chat::VANISH_EXPIRED_TEXT;
-        if rows == 0 && (!msg.raw_json.is_empty() || is_tombstone) {
-            let raw = if is_tombstone {
-                // Non-empty tombstone marker so the row is never skipped or
-                // re-hydrated as original content; hydrate ignores `vanished`.
-                VANISH_TOMBSTONE_JSON
-            } else {
-                msg.raw_json.as_str()
-            };
-            let _ = self.conn.execute(
-                "UPDATE messages SET raw_json = ?1, msg_type = ?2, text = ?4 WHERE msg_id = ?3",
-                params![raw, msg.msg_type, msg.msg_id, msg.text],
-            );
+        let trimmed = msg.text.trim();
+        let is_tombstone =
+            msg.raw_json.is_empty() && trimmed == crate::chat::VANISH_EXPIRED_TEXT;
+        let is_incoming_undo = !is_tombstone
+            && (trimmed == "[Tin nhắn đã thu hồi]"
+                || msg.msg_type == "chat.undo"
+                || msg.msg_type == "undo");
+        if rows == 0 {
+            if is_tombstone {
+                let _ = self.conn.execute(
+                    "UPDATE messages SET raw_json = ?1, msg_type = ?2, text = ?4 WHERE msg_id = ?3",
+                    params![
+                        VANISH_TOMBSTONE_JSON,
+                        msg.msg_type,
+                        msg.msg_id,
+                        msg.text
+                    ],
+                );
+            } else if is_incoming_undo {
+                // Anti-recall: never overwrite saved original text, raw_json, or msg_type
+                // with a `[Tin nhắn đã thu hồi]` / `chat.undo` payload; mark existing content.
+                let _ = self.conn.execute(
+                    "UPDATE messages
+                     SET text = '[Đã thu hồi] ' || text
+                     WHERE msg_id = ?1
+                       AND TRIM(text) != ''
+                       AND TRIM(text) != '[Tin nhắn đã thu hồi]'
+                       AND TRIM(text) NOT LIKE '[Đã thu hồi]%'
+                       AND raw_json NOT LIKE '%\"vanished\":true%'",
+                    params![msg.msg_id],
+                );
+            } else if !msg.raw_json.is_empty() {
+                let _ = self.conn.execute(
+                    "UPDATE messages
+                     SET raw_json = ?1,
+                         msg_type = ?2,
+                         text = CASE
+                             WHEN TRIM(?4) LIKE '[Đã thu hồi]%' THEN
+                                 CASE
+                                     WHEN LENGTH(TRIM(?4)) > 14 THEN ?4
+                                     WHEN TRIM(text) != '' AND TRIM(text) != '[Tin nhắn đã thu hồi]' AND TRIM(text) NOT LIKE '[Đã thu hồi]%'
+                                         THEN '[Đã thu hồi] ' || text
+                                     ELSE text
+                                 END
+                             WHEN TRIM(text) = '[Tin nhắn đã thu hồi]' AND TRIM(?4) != ''
+                                 THEN '[Đã thu hồi] ' || ?4
+                             WHEN TRIM(text) LIKE '[Đã thu hồi]%' AND LENGTH(TRIM(text)) > 14
+                                 THEN text
+                             WHEN TRIM(text) LIKE '[Đã thu hồi]%' AND TRIM(?4) != ''
+                                 THEN '[Đã thu hồi] ' || ?4
+                             WHEN TRIM(?4) != '' THEN ?4
+                             ELSE text
+                         END
+                     WHERE msg_id = ?3
+                       AND raw_json NOT LIKE '%\"vanished\":true%'",
+                    params![msg.raw_json, msg.msg_type, msg.msg_id, msg.text],
+                );
+            } else if trimmed.starts_with("[Đã thu hồi]") {
+                let _ = self.conn.execute(
+                    "UPDATE messages
+                     SET text = CASE
+                         WHEN LENGTH(TRIM(?2)) > 14 THEN ?2
+                         WHEN TRIM(text) != '' AND TRIM(text) != '[Tin nhắn đã thu hồi]' AND TRIM(text) NOT LIKE '[Đã thu hồi]%'
+                             THEN '[Đã thu hồi] ' || text
+                         ELSE text
+                     END
+                     WHERE msg_id = ?1
+                       AND raw_json NOT LIKE '%\"vanished\":true%'",
+                    params![msg.msg_id, msg.text],
+                );
+            }
         }
         Ok(rows > 0)
     }
@@ -1856,6 +1927,25 @@ impl MessageStore {
                             .and_then(|v| serde_json::from_value(v.clone()).ok());
                     }
                 }
+                let is_video_url = link_url.as_deref().is_some_and(|u| {
+                    let l = u.to_ascii_lowercase();
+                    l.contains("video-")
+                        || l.contains(".dlmd.me")
+                        || l.contains("/video/")
+                        || l.ends_with(".mp4")
+                });
+                let mut final_text = sm.text;
+                let mut final_kind = crate::message_model::MessageKind::Text;
+                if is_video_url || link_src.as_deref() == Some("Video Zalo") {
+                    link_src = Some("Video Zalo".to_string());
+                    link_title = Some("Video".to_string());
+                    final_kind = crate::message_model::MessageKind::Video;
+                    if final_text.starts_with("[Tập tin]")
+                        || (final_text.len() > 20 && !final_text.contains(' '))
+                    {
+                        final_text = "[Video]".to_string();
+                    }
+                }
                 let cm = ChatMessage {
                     id: sm.msg_id,
                     sender: if !sm.sender_name.is_empty() {
@@ -1863,7 +1953,7 @@ impl MessageStore {
                     } else {
                         sm.sender_id
                     },
-                    text: sm.text,
+                    text: final_text,
                     time,
                     is_outgoing: sm.is_outgoing,
                     ts: sm.ts,
@@ -1872,6 +1962,7 @@ impl MessageStore {
                     } else {
                         crate::message_model::DeliveryState::Unknown
                     },
+                    kind: final_kind,
                     sticker_id,
                     sticker_cate_id,
                     sticker_type,
@@ -1901,6 +1992,13 @@ impl MessageStore {
                                     && cm.ts != 0
                                     && (existing.ts - cm.ts).abs() < 5000)))
                 }) {
+                    crate::chat::apply_recall_merge(existing, &cm.text);
+                    if existing.kind == crate::message_model::MessageKind::Text
+                        && cm.kind != crate::message_model::MessageKind::Text
+                        && cm.kind != crate::message_model::MessageKind::Recall
+                    {
+                        existing.kind = cm.kind;
+                    }
                     if existing.sticker_id.is_none() && cm.sticker_id.is_some() {
                         existing.sticker_id = cm.sticker_id;
                         existing.sticker_cate_id = cm.sticker_cate_id;
@@ -1917,7 +2015,10 @@ impl MessageStore {
                         existing.link_desc = cm.link_desc;
                         existing.link_thumb = cm.link_thumb;
                         existing.link_src = cm.link_src;
-                        if !cm.text.is_empty() {
+                        if !cm.text.is_empty()
+                            && !existing.text.starts_with("[Đã thu hồi]")
+                            && existing.text.trim() != "[Tin nhắn đã thu hồi]"
+                        {
                             existing.text = cm.text;
                         }
                     }
@@ -2098,15 +2199,39 @@ pub fn merge_stored_read_point(unread: &mut crate::unread::UnreadState, stored: 
 
 /// Persist threads and their messages to SQLite store, returning the count of newly inserted messages.
 pub fn persist_threads(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
+    persist_threads_in_transaction(store, threads, true)
+}
+
+/// Persist received messages without touching per-thread user state.
+///
+/// Used by listeners of inactive accounts, whose thread list is a stale snapshot: the
+/// stored vanish settings and read-point are kept, only names, `last_ts` and messages
+/// are merged. Returns the count of newly inserted messages.
+///
+/// # Errors
+/// Returns an error when the transaction or any row write fails.
+pub fn persist_received_messages(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
+    persist_threads_in_transaction(store, threads, false)
+}
+
+fn persist_threads_in_transaction(
+    store: &mut MessageStore,
+    threads: &[Thread],
+    with_user_state: bool,
+) -> Result<usize> {
     // One transaction for the whole snapshot: in autocommit every row was its own fsync.
     store.conn.execute_batch("BEGIN")?;
-    let res = persist_threads_inner(store, threads);
+    let res = persist_threads_inner(store, threads, with_user_state);
     store
         .conn
         .execute_batch(if res.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
     res
 }
-fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
+fn persist_threads_inner(
+    store: &mut MessageStore,
+    threads: &[Thread],
+    with_user_state: bool,
+) -> Result<usize> {
     let mut new_count = 0;
     for t in threads {
         let last_ts = t.messages.iter().map(|m| m.ts).max().unwrap_or(0);
@@ -2117,11 +2242,16 @@ fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result
             last_ts,
             vanish_duration_sec: t.vanish.as_ref().map(|v| v.duration_sec).unwrap_or(0),
             vanish_started_at_sec: t.vanish.as_ref().map(|v| v.started_at_sec).unwrap_or(0),
-            last_read_msg_id: t.unread.last_seen_id.clone().unwrap_or_default(),
+            // An empty read-point keeps the stored one (see the upsert's CASE).
+            last_read_msg_id: if with_user_state {
+                t.unread.last_seen_id.clone().unwrap_or_default()
+            } else {
+                String::new()
+            },
         };
         // RAM snapshot carries the user's vanish intent (incl. explicit disable),
         // unlike history-sync pages which must preserve stored vanish (#376).
-        store.upsert_thread_inner(&st, true, t.presentation.contact_name)?;
+        store.upsert_thread_inner(&st, with_user_state, t.presentation.contact_name)?;
         for m in t.messages.iter().filter(|m| m.text != "sendBubbleMessage") {
             let mut sm = StoredMessage::from(m);
             sm.thread_id = t.id.clone();
@@ -3457,6 +3587,123 @@ mod tests {
                 || expired.raw_json.trim() == crate::store::VANISH_TOMBSTONE_JSON
         );
     }
+
+    #[test]
+    fn anti_recall_preserves_original_text_and_media_on_undo_and_hydrate() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let photo_meta = serde_json::json!({
+            "link_url": "https://f60-zpg-r.zdn.vn/photo.jpg",
+            "link_thumb": "https://f60-zpg-r.zdn.vn/thumb.jpg",
+            "link_src": "Hình ảnh Zalo"
+        })
+        .to_string();
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_photo".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Hình ảnh] Ảnh hợp đồng".into(),
+                msg_type: "chat.photo".into(),
+                ts: 1000,
+                is_outgoing: false,
+                raw_json: photo_meta.clone(),
+            })
+            .unwrap();
+        // Server sync / undo payload with non-empty metadata must not erase text or link_url.
+        assert!(!store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_photo".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Tin nhắn đã thu hồi]".into(),
+                msg_type: "chat.undo".into(),
+                ts: 2000,
+                is_outgoing: false,
+                raw_json: "{\"undo\":true}".into(),
+            })
+            .unwrap());
+        // Reverse order: recall stub saved first, then original sticker sync arrives later.
+        let sticker_meta = serde_json::json!({
+            "stickerId": 18009,
+            "cateId": 10130,
+            "type": 7
+        })
+        .to_string();
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_stk".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Tin nhắn đã thu hồi]".into(),
+                msg_type: "chat.undo".into(),
+                ts: 3000,
+                is_outgoing: false,
+                raw_json: String::new(),
+            })
+            .unwrap();
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_stk".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Alice".into(),
+                text: "[Nhãn dán]".into(),
+                msg_type: "chat.sticker".into(),
+                ts: 3000,
+                is_outgoing: false,
+                raw_json: sticker_meta,
+            })
+            .unwrap();
+
+        let rows = store.messages_for("t1", 10).unwrap();
+        let p = rows.iter().find(|r| r.msg_id == "m_photo").unwrap();
+        assert_eq!(p.text, "[Đã thu hồi] [Hình ảnh] Ảnh hợp đồng");
+        assert_eq!(p.raw_json, photo_meta);
+        let s = rows.iter().find(|r| r.msg_id == "m_stk").unwrap();
+        assert_eq!(s.text, "[Đã thu hồi] [Nhãn dán]");
+
+        // Server snapshot in RAM has bare "[Tin nhắn đã thu hồi]" stub; hydrate must restore content + media.
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "t1".into(),
+                name: "Alice".into(),
+                is_group: false,
+                last_ts: 3000,
+                vanish_duration_sec: 0,
+                vanish_started_at_sec: 0,
+                last_read_msg_id: String::new(),
+            })
+            .unwrap();
+        let mut threads = vec![Thread {
+            id: "t1".into(),
+            name: "Alice".into(),
+            messages: vec![
+                ChatMessage {
+                    id: "m_photo".into(),
+                    text: "[Tin nhắn đã thu hồi]".into(),
+                    ts: 1000,
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "m_stk".into(),
+                    text: "[Tin nhắn đã thu hồi]".into(),
+                    ts: 3000,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+        store.hydrate_threads(&mut threads, 10).unwrap();
+        let hp = threads[0].messages.iter().find(|m| m.id == "m_photo").unwrap();
+        assert_eq!(hp.text, "[Đã thu hồi] [Hình ảnh] Ảnh hợp đồng");
+        assert_eq!(hp.link_url.as_deref(), Some("https://f60-zpg-r.zdn.vn/photo.jpg"));
+        let hs = threads[0].messages.iter().find(|m| m.id == "m_stk").unwrap();
+        assert_eq!(hs.text, "[Đã thu hồi] [Nhãn dán]");
+        assert_eq!(hs.sticker_id, Some(18009));
+    }
     #[test]
     fn test_persist_threads_and_upsert_thread() {
         let mut store = MessageStore::open(":memory:").unwrap();
@@ -3789,5 +4036,45 @@ mod tests {
         assert_eq!(map.get("u1").map(|x| x.0.as_str()), Some("Biệt danh 1"));
         assert_eq!(map.get("u2").map(|x| x.0.as_str()), Some("123"));
         assert_eq!(map.get("u3").map(|x| x.0.as_str()), Some("Tên Gốc 3"));
+    }
+
+    #[test]
+    fn reader_is_not_blocked_while_another_connection_holds_a_write_transaction() {
+        // A file is required: the lock under test only exists between connections.
+        let dir = std::env::temp_dir().join(format!(
+            "ctdozlite-wal-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        let path = path.to_str().unwrap();
+
+        let writer = MessageStore::open(path).unwrap();
+        writer.conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        writer
+            .conn
+            .execute(
+                "INSERT INTO threads (thread_id, name, is_group, last_ts) VALUES ('thread-1', 'T', 0, 1)",
+                [],
+            )
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let reader = MessageStore::open(path).unwrap();
+        assert_eq!(reader.count_messages("thread-1").unwrap(), 0);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "reader waited {:?} behind the writer",
+            started.elapsed()
+        );
+
+        writer.conn.execute_batch("COMMIT").unwrap();
+        drop(reader);
+        drop(writer);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -302,11 +302,6 @@ pub fn pick_single_file() -> Option<PathBuf> {
     pick_native_files(false, false).into_iter().next()
 }
 
-/// Native folder dialog. Blocking.
-pub fn pick_folder() -> Option<PathBuf> {
-    pick_native_folder()
-}
-
 /// Copied files on the clipboard (Explorer / Finder / file managers), in clipboard order.
 pub fn read_clipboard_file_list() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
