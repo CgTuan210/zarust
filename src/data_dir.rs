@@ -106,7 +106,9 @@ pub fn resolve(
         ),
         Platform::Linux { xdg_data_home } => {
             // The XDG spec says a relative XDG_DATA_HOME is invalid and must be ignored.
-            let data_home = match xdg_data_home.filter(|p| p.is_absolute()) {
+            let data_home = match xdg_data_home
+                .filter(|p| p.is_absolute() || p.to_str().is_some_and(|s| s.starts_with('/')))
+            {
                 Some(dir) => dir.to_path_buf(),
                 None => absolute_home()?.join(".local/share"),
             };

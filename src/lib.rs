@@ -58,3 +58,6 @@ pub mod native_notifications;
 
 #[cfg(any(windows, test))]
 mod clipboard_dib;
+
+#[cfg(test)]
+mod property_invariants;

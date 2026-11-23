@@ -719,6 +719,7 @@ fn paint_single_circle_avatar(
         // 240x240 / 480x480 Zalo avatars by 1.5x–3x).
         let key = format!("avt_{hash}");
         if let Some(tex) = textures.get(&key) {
+            crate::gui::mark_texture_used(&key);
             paint_circular_image(painter, center, radius, tex);
             painter.circle_stroke(
                 center,
@@ -974,7 +975,7 @@ pub mod lucide {
     pub const LOG_OUT: &str = "\u{e10e}";
     pub const FILE_TEXT: &str = "\u{e0cc}";
     pub const FILM: &str = "\u{e0d0}";
-    pub const SHIELD_CHECK: &str = "\u{e15c}";
+    pub const SHIELD_CHECK: &str = "\u{e1ff}";
     pub const LOCK: &str = "\u{e10b}";
     pub const BELL: &str = "\u{e059}";
     pub const PAINTBRUSH: &str = "\u{e2e7}";
