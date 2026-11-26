@@ -84,14 +84,17 @@ fn embed_windows_icon() -> Result<(), Box<dyn std::error::Error>> {
     // GNU ld cannot read a raw .res; windres (MinGW binutils) converts it to a COFF object.
     let link_path = if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
         let obj_path = out_dir.join("app_icon.o");
-        let ok = std::process::Command::new("windres")
-            .args(["-J", "res", "-O", "coff", "-i"])
-            .arg(&res_path)
-            .arg("-o")
-            .arg(&obj_path)
-            .status()?
-            .success();
-        if !ok {
+        let run_windres = |bin: &str| {
+            std::process::Command::new(bin)
+                .args(["-J", "res", "-O", "coff", "-i"])
+                .arg(&res_path)
+                .arg("-o")
+                .arg(&obj_path)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !run_windres("windres") && !run_windres("x86_64-w64-mingw32-windres") {
             return Err("windres failed".into());
         }
         obj_path

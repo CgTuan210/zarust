@@ -1288,25 +1288,117 @@ pub(crate) async fn import_mobile_backup_container_batch(
 
                     let mut text = content_opt.unwrap_or_default().trim().to_string();
                     let mut msg_type = "webchat".to_string();
+                    let mut raw_json = String::new();
 
-                    if text.is_empty() {
-                        if let Some(bn) = &bin_net_opt {
-                            let s_latin = String::from_utf8_lossy(bn);
-                            if let Some(pos) = s_latin.find("maps.app.goo.gl") {
-                                msg_type = "chat.link".to_string();
-                                let sub = &s_latin[pos..];
-                                let end_url = sub.find(['"', '}', '\\', ' ']).unwrap_or(sub.len());
-                                let url = format!("https://{}", &sub[..end_url]);
+                    if let Some(bn) = &bin_net_opt {
+                        let s_latin = String::from_utf8_lossy(bn);
+                        if let Some(pos) = s_latin.find("maps.app.goo.gl") {
+                            msg_type = "chat.link".to_string();
+                            let sub = &s_latin[pos..];
+                            let end_url =
+                                sub.find(['"', '}', '\\', ' ', '\0', '\r', '\n']).unwrap_or(sub.len());
+                            let url = format!("https://{}", &sub[..end_url]);
+                            raw_json = serde_json::json!({ "link_url": url }).to_string();
+                            if text.is_empty() {
                                 text = format!("Tôi đang trên đường tới. Bạn có thể xem tiến độ đi đường và thời gian đến của tôi trên Maps: {url}");
-                            } else if msg_type_num == 10 {
+                            }
+                        } else if msg_type_num == 12 {
+                            msg_type = "chat.link".to_string();
+                            let mut meta_map = serde_json::Map::new();
+                            if let Some(j_start) = s_latin.find('{') {
+                                if let Some(j_end) = s_latin.rfind('}') {
+                                    if j_end > j_start {
+                                        if let Ok(serde_json::Value::Object(obj)) =
+                                            serde_json::from_str(&s_latin[j_start..=j_end])
+                                        {
+                                            for k in ["href", "url", "rawUrl"] {
+                                                if let Some(u) = obj
+                                                    .get(k)
+                                                    .and_then(|v| v.as_str())
+                                                    .filter(|s| !s.is_empty())
+                                                {
+                                                    meta_map.insert(
+                                                        "link_url".into(),
+                                                        serde_json::json!(u),
+                                                    );
+                                                    break;
+                                                }
+                                            }
+                                            if let Some(t) = obj
+                                                .get("title")
+                                                .and_then(|v| v.as_str())
+                                                .filter(|s| !s.is_empty())
+                                            {
+                                                meta_map.insert(
+                                                    "link_title".into(),
+                                                    serde_json::json!(t),
+                                                );
+                                            }
+                                            if let Some(d) = obj
+                                                .get("description")
+                                                .or_else(|| obj.get("desc"))
+                                                .and_then(|v| v.as_str())
+                                                .filter(|s| !s.is_empty())
+                                            {
+                                                meta_map.insert(
+                                                    "link_desc".into(),
+                                                    serde_json::json!(d),
+                                                );
+                                            }
+                                            if let Some(th) = obj
+                                                .get("thumb")
+                                                .and_then(|v| v.as_str())
+                                                .filter(|s| !s.is_empty())
+                                            {
+                                                meta_map.insert(
+                                                    "link_thumb".into(),
+                                                    serde_json::json!(th),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !meta_map.contains_key("link_url") {
+                                if let Some(pos) =
+                                    s_latin.find("https://").or_else(|| s_latin.find("http://"))
+                                {
+                                    let sub = &s_latin[pos..];
+                                    let end_url = sub
+                                        .find(|c: char| {
+                                            c.is_control()
+                                                || c.is_whitespace()
+                                                || matches!(c, '"' | '\'' | '}' | '\\' | '<' | '>')
+                                        })
+                                        .unwrap_or(sub.len());
+                                    let candidate = &sub[..end_url];
+                                    if candidate.len() >= 10 {
+                                        meta_map.insert(
+                                            "link_url".into(),
+                                            serde_json::json!(candidate),
+                                        );
+                                    }
+                                }
+                            }
+                            if let Some(u) = meta_map
+                                .get("link_url")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string)
+                            {
+                                if text.is_empty() {
+                                    text = u;
+                                }
+                            }
+                            if !meta_map.is_empty() {
+                                raw_json = serde_json::Value::Object(meta_map).to_string();
+                            }
+                        } else if text.is_empty() {
+                            if msg_type_num == 10 {
                                 msg_type = "chat.sticker".to_string();
                                 text = "[Nhãn dán]".to_string();
                             } else if msg_type_num == 3 {
                                 msg_type = "chat.photo".to_string();
                                 text = "[Hình ảnh]".to_string();
-                            } else if msg_type_num == 12 {
-                                msg_type = "chat.link".to_string();
-                                text = "[Liên kết]".to_string();
                             }
                         }
                     }
@@ -1333,7 +1425,7 @@ pub(crate) async fn import_mobile_backup_container_batch(
                         msg_type,
                         ts,
                         is_outgoing,
-                        raw_json: String::new(),
+                        raw_json,
                     });
                 }
 
@@ -2514,7 +2606,18 @@ fn decode_sync_v2_proto_message(
             }
         } else {
             let params_obj = parse_json_obj(att.params.as_deref());
-            if let Some(href) = att.href.as_deref().filter(|h| !h.is_empty()) {
+            if let Some(href) = att
+                .href
+                .as_deref()
+                .filter(|h| !h.is_empty())
+                .or_else(|| {
+                    params_obj.as_ref().and_then(|p| {
+                        ["href", "url", "rawUrl"]
+                            .into_iter()
+                            .find_map(|k| p.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
+                    })
+                })
+            {
                 raw_meta.insert("link_url".into(), serde_json::json!(href));
             }
             if let Some(title) = att

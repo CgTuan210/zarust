@@ -2943,24 +2943,41 @@ impl ZaloGuiApp {
                                     .link_url
                                     .as_deref()
                                     .filter(|u| {
-                                        u.starts_with("http://") || u.starts_with("https://")
+                                        u.starts_with("http://")
+                                            || u.starts_with("https://")
+                                            || u.starts_with("www.")
                                     })
+                                    .map(str::to_string)
                                     .or_else(|| {
                                         let txt = m.text.trim();
-                                        let pos =
-                                            txt.find("https://").or_else(|| txt.find("http://"))?;
+                                        let pos = txt
+                                            .find("https://")
+                                            .or_else(|| txt.find("http://"))
+                                            .or_else(|| txt.find("www."))?;
                                         let after = &txt[pos..];
                                         let end =
                                             after.find(char::is_whitespace).unwrap_or(after.len());
-                                        Some(&after[..end])
+                                        let cleaned = after[..end].trim_end_matches(|c: char| {
+                                            matches!(c, ')' | ']' | ',' | ';' | '>' | '.')
+                                        });
+                                        if cleaned.starts_with("www.") {
+                                            Some(format!("https://{cleaned}"))
+                                        } else {
+                                            Some(cleaned.to_string())
+                                        }
                                     })?;
-                                if crate::chat::is_zalo_photo_cdn_url(raw_url) {
+                                let normalized_url = if raw_url.starts_with("www.") {
+                                    format!("https://{raw_url}")
+                                } else {
+                                    raw_url
+                                };
+                                if crate::chat::is_zalo_photo_cdn_url(&normalized_url) {
                                     return None;
                                 }
-                                let domain = raw_url
+                                let domain = normalized_url
                                     .split("://")
                                     .nth(1)
-                                    .unwrap_or(raw_url)
+                                    .unwrap_or(&normalized_url)
                                     .split('/')
                                     .next()
                                     .unwrap_or("link")
@@ -2970,9 +2987,9 @@ impl ZaloGuiApp {
                                     .link_title
                                     .as_deref()
                                     .filter(|s| !s.trim().is_empty())
-                                    .unwrap_or(raw_url)
+                                    .unwrap_or(&normalized_url)
                                     .to_string();
-                                Some((title, raw_url.to_string(), domain, m.time.clone()))
+                                Some((title, normalized_url, domain, m.time.clone()))
                             })
                             .take(30)
                             .collect()
@@ -5024,9 +5041,20 @@ impl ZaloGuiApp {
                                                     .on_hover_cursor(CursorIcon::PointingHand)
                                                     .on_hover_text(lurl);
                                                 if row_resp.clicked() {
-                                                    ui.ctx()
-                                                        .open_url(egui::OpenUrl::new_tab(lurl));
+                                                    if let Err(e) = open_external_url(lurl) {
+                                                        self.show_toast(e);
+                                                    }
                                                 }
+                                                row_resp.context_menu(|ui| {
+                                                    if ui.button("🔗 Mở liên kết").clicked() {
+                                                        let _ = open_external_url(lurl);
+                                                        ui.close_menu();
+                                                    }
+                                                    if ui.button("📋 Sao chép liên kết").clicked() {
+                                                        ui.ctx().copy_text(lurl.clone());
+                                                        ui.close_menu();
+                                                    }
+                                                });
                                                 ui.add_space(6.0);
                                             }
 

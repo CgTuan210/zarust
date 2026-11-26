@@ -839,7 +839,13 @@ pub(super) fn extract_clean_domain(url: &str) -> String {
 }
 
 pub(super) fn extract_message_link_view(msg: &ChatMessage) -> Option<(String, String, String)> {
-    if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
+    if let Some(raw_url) = msg.link_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        let url_owned = if raw_url.starts_with("www.") {
+            format!("https://{raw_url}")
+        } else {
+            raw_url.to_string()
+        };
+        let url = url_owned.as_str();
         if crate::chat::is_zalo_photo_cdn_url(url) {
             return None;
         }
@@ -850,11 +856,15 @@ pub(super) fn extract_message_link_view(msg: &ChatMessage) -> Option<(String, St
         let mut kept_lines = Vec::new();
         for raw_line in msg.text.lines() {
             let mut line = raw_line.trim().to_string();
-            if let Some(pos) = line.find("http://").or_else(|| line.find("https://")) {
+            if let Some(pos) = line
+                .find("http://")
+                .or_else(|| line.find("https://"))
+                .or_else(|| line.find("www."))
+            {
                 let after = &line[pos..];
                 let end = after.find(char::is_whitespace).unwrap_or(after.len());
                 let found = &after[..end];
-                if found == url || found.starts_with(url_base) {
+                if found == url || found == raw_url || found.starts_with(url_base) {
                     line = format!("{}{}", &line[..pos], &after[end..])
                         .trim()
                         .to_string();
@@ -862,6 +872,7 @@ pub(super) fn extract_message_link_view(msg: &ChatMessage) -> Option<(String, St
             }
             if line.is_empty()
                 || line == url
+                || line == raw_url
                 || line == title_trim
                 || line == desc_trim
                 || line == "[Chia sẻ]"
@@ -875,21 +886,27 @@ pub(super) fn extract_message_link_view(msg: &ChatMessage) -> Option<(String, St
         }
         let user_comment = kept_lines.join("\n").trim().to_string();
         let domain = extract_clean_domain(url);
-        return Some((user_comment, url.to_string(), domain));
+        return Some((user_comment, url_owned, domain));
     }
     let text = msg.text.trim();
-    let pos = text.find("https://").or_else(|| text.find("http://"))?;
+    let pos = find_next_bare_url(text)?;
     let after = &text[pos..];
     let end = after.find(char::is_whitespace).unwrap_or(after.len());
-    let url = after[..end].trim_end_matches(|c: char| matches!(c, ')' | ']' | ',' | ';' | '>'));
-    if url.len() < 10 || crate::chat::is_zalo_photo_cdn_url(url) {
+    let raw_tok =
+        after[..end].trim_end_matches(|c: char| matches!(c, ')' | ']' | ',' | ';' | '>' | '.'));
+    let normalized = if raw_tok.starts_with("www.") {
+        format!("https://{raw_tok}")
+    } else {
+        raw_tok.to_string()
+    };
+    if normalized.len() < 10 || crate::chat::is_zalo_photo_cdn_url(&normalized) {
         return None;
     }
     let caption = format!("{}{}", &text[..pos], &after[end..])
         .trim()
         .to_string();
-    let domain = extract_clean_domain(url);
-    Some((caption, url.to_string(), domain))
+    let domain = extract_clean_domain(&normalized);
+    Some((caption, normalized, domain))
 }
 
 /// Convert days since 1970-01-01 into `(year, month, day)` (Howard Hinnant's algorithm).
@@ -1288,11 +1305,14 @@ fn find_next_mention(s: &str) -> Option<usize> {
 
 fn find_next_bare_url(s: &str) -> Option<usize> {
     let mut best: Option<usize> = None;
-    for scheme in ["https://", "http://"] {
+    for scheme in ["https://", "http://", "www."] {
         let mut offset = 0;
         while let Some(rel) = s[offset..].find(scheme) {
             let idx = offset + rel;
-            let prev_alnum = s[..idx].chars().next_back().is_some_and(char::is_alphanumeric);
+            let prev_alnum = s[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '/' || c == '@');
             if !prev_alnum {
                 best = Some(best.map_or(idx, |b| b.min(idx)));
                 break;
@@ -1654,7 +1674,9 @@ fn render_markdown_inline_rich_opts(
         .iter()
         .filter_map(|r| match r {
             InlineMdRun::Link { url, .. }
-                if url.starts_with("http://") || url.starts_with("https://") =>
+                if url.starts_with("http://")
+                    || url.starts_with("https://")
+                    || url.starts_with("www.") =>
             {
                 Some(url.as_str())
             }
@@ -1730,7 +1752,7 @@ pub(super) fn render_chat_markdown_block(
     render_chat_markdown_block_opts(ui, raw, text_col, pal, true, true)
 }
 
-/// Bản có toggle: `enabled=false` → plaintext nguyên văn (không parse gì);
+/// Bản có toggle: `enabled=false` → plaintext nguyên văn (nhưng vẫn cho bấm mở URL nếu có);
 /// `zalo_bold` điều khiển `*đậm*` kiểu Zalo (xem consume_zalo_bold).
 pub(super) fn render_chat_markdown_block_opts(
     ui: &mut egui::Ui,
@@ -1741,7 +1763,13 @@ pub(super) fn render_chat_markdown_block_opts(
     zalo_bold: bool,
 ) {
     if !enabled {
-        ui.add(egui::Label::new(RichText::new(raw).size(14.0).color(text_col)).wrap());
+        if find_next_bare_url(raw).is_some() {
+            for line in raw.lines() {
+                render_markdown_inline_rich_opts(ui, line, 14.0, text_col, pal, false);
+            }
+        } else {
+            ui.add(egui::Label::new(RichText::new(raw).size(14.0).color(text_col)).wrap());
+        }
         return;
     }
     for block in split_md_blocks(raw) {
@@ -3120,7 +3148,7 @@ pub(super) fn classify_attachment(msg: &crate::chat::ChatMessage) -> Option<Atta
         || trimmed.starts_with("[Video]")
         || msg.link_url.as_deref().is_some_and(|u| {
             let l = u.to_ascii_lowercase();
-            l.contains("video") || l.contains(".dlmd.me")
+            l.contains(".dlmd.me") || (is_zalo_media_cdn_host(u) && l.contains("video"))
         });
     if is_video {
         return Some(AttachmentKind::Video);
@@ -4044,6 +4072,24 @@ fn format_duration_mmss(secs: Option<u64>) -> String {
 }
 
 
+pub(super) fn is_zalo_media_cdn_host(url: &str) -> bool {
+    let host = url
+        .split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split(['/', '?', '#', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    host.ends_with(".zdn.vn")
+        || host.ends_with(".zadn.vn")
+        || host.ends_with(".zaloapp.com")
+        || host.ends_with(".dlfl.vn")
+        || host.ends_with(".dlmd.me")
+        || host == "dlmd.me"
+}
+
 pub(super) fn is_zalo_file_or_video_message(msg: &ChatMessage) -> bool {
     let trimmed = strip_recall_prefix(&msg.text);
     msg.kind == crate::message_model::MessageKind::Video
@@ -4051,12 +4097,14 @@ pub(super) fn is_zalo_file_or_video_message(msg: &ChatMessage) -> bool {
         || matches!(
             msg.link_src.as_deref(),
             Some("Tập tin Zalo") | Some("Video Zalo")
-        ) || trimmed.starts_with("[Tập tin]")
+        )
+        || trimmed.starts_with("[Tập tin]")
         || trimmed.starts_with("[Video]")
         || trimmed.starts_with("[Tin nhắn thoại]")
         || msg.link_url.as_deref().is_some_and(|u| {
             let l = u.to_ascii_lowercase();
-            l.contains("/renewmedia") || l.contains("video-") || l.contains(".dlmd.me")
+            l.contains(".dlmd.me")
+                || (is_zalo_media_cdn_host(u) && (l.contains("/renewmedia") || l.contains("video-")))
         })
 }
 
@@ -5669,6 +5717,21 @@ pub(super) fn bubble_context_menu(
                                     url: url.to_string(),
                                     file_name: resolved_name,
                                 });
+                                close_menu = true;
+                            }
+                        }
+                    } else if !vanished && !is_zalo_photo_message(msg) && is_sticker_message(msg).is_none() {
+                        if let Some((_, link_url, _)) = extract_message_link_view(msg) {
+                            if menu_item(ui, lucide::EXTERNAL_LINK, "Mở liên kết", pal.text_primary)
+                                .clicked()
+                            {
+                                let _ = open_external_url(&link_url);
+                                close_menu = true;
+                            }
+                            if menu_item(ui, lucide::COPY, "Sao chép liên kết", pal.text_primary)
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(link_url);
                                 close_menu = true;
                             }
                         }
@@ -7464,5 +7527,41 @@ mod md_block_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn external_web_links_with_video_slugs_are_not_misclassified_as_zalo_attachments() {
+        let tiktok_msg = ChatMessage {
+            id: "m1".into(),
+            text: "Xem này https://www.tiktok.com/@creator/video-1234567890".into(),
+            link_url: Some("https://www.tiktok.com/@creator/video-1234567890".into()),
+            link_title: Some("TikTok clip".into()),
+            ..Default::default()
+        };
+        assert!(!is_zalo_file_or_video_message(&tiktok_msg));
+        assert!(classify_attachment(&tiktok_msg).is_none());
+        let (_, url, domain) = extract_message_link_view(&tiktok_msg).expect("web link view");
+        assert_eq!(url, "https://www.tiktok.com/@creator/video-1234567890");
+        assert_eq!(domain, "tiktok.com");
+
+        let news_msg = ChatMessage {
+            id: "m2".into(),
+            text: "https://vnexpress.net/tin-moi-video-4800000.html".into(),
+            link_url: Some("https://vnexpress.net/tin-moi-video-4800000.html".into()),
+            ..Default::default()
+        };
+        assert!(!is_zalo_file_or_video_message(&news_msg));
+        assert!(classify_attachment(&news_msg).is_none());
+
+        let www_msg = ChatMessage {
+            id: "m3".into(),
+            text: "Ghế văn phòng www.shopee.vn/san-pham-123".into(),
+            ..Default::default()
+        };
+        let (caption, www_url, www_dom) =
+            extract_message_link_view(&www_msg).expect("www link view");
+        assert_eq!(caption, "Ghế văn phòng");
+        assert_eq!(www_url, "https://www.shopee.vn/san-pham-123");
+        assert_eq!(www_dom, "shopee.vn");
     }
 }
