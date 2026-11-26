@@ -343,6 +343,101 @@ pub fn extract_mute_map(
     Some(map)
 }
 
+fn clean_mute_id(raw: &str) -> &str {
+    raw.trim()
+        .trim_start_matches("group_")
+        .trim_start_matches('g')
+        .trim_start_matches('G')
+        .trim_start_matches('u')
+        .trim_start_matches('U')
+        .trim()
+}
+
+/// Look up an active mute expiry (`-1` for indefinite or `until > now_unix`) for `thread_id`
+/// across Zalo's 1-1 (`<id>`, `u<id>`) and group (`<id>`, `g<id>`, `group_<id>`) key forms.
+pub fn muted_until_in_map(
+    muted_threads: &std::collections::HashMap<String, i64>,
+    thread_id: &str,
+    is_group: bool,
+    now_unix: i64,
+) -> Option<i64> {
+    if muted_threads.is_empty() {
+        return None;
+    }
+    let clean = clean_mute_id(thread_id);
+    if clean.is_empty() || clean == "0" {
+        return None;
+    }
+    let active = |val: Option<&i64>| val.copied().filter(|&u| u == -1 || u > now_unix);
+    if is_group {
+        active(muted_threads.get(thread_id))
+            .or_else(|| active(muted_threads.get(clean)))
+            .or_else(|| active(muted_threads.get(&format!("g{clean}"))))
+            .or_else(|| active(muted_threads.get(&format!("G{clean}"))))
+            .or_else(|| active(muted_threads.get(&format!("group_{clean}"))))
+    } else {
+        let raw_trimmed = thread_id.trim();
+        let is_group_prefixed = raw_trimmed.starts_with('g')
+            || raw_trimmed.starts_with('G')
+            || raw_trimmed.starts_with("group_");
+        if is_group_prefixed {
+            return None;
+        }
+        active(muted_threads.get(raw_trimmed))
+            .or_else(|| active(muted_threads.get(clean)))
+            .or_else(|| active(muted_threads.get(&format!("u{clean}"))))
+            .or_else(|| active(muted_threads.get(&format!("U{clean}"))))
+    }
+}
+
+/// Return `true` when a thread `(thread_id, thread_is_group)` refers to the same conversation
+/// as a mute control event `(mute_id, mute_is_group)`.
+pub fn thread_matches_mute_id(
+    thread_id: &str,
+    thread_is_group: bool,
+    mute_id: &str,
+    mute_is_group: bool,
+) -> bool {
+    if thread_is_group != mute_is_group {
+        return false;
+    }
+    let a = clean_mute_id(thread_id);
+    let b = clean_mute_id(mute_id);
+    !a.is_empty() && a != "0" && a == b
+}
+
+/// Insert or remove a mute entry in `muted_threads`, clearing all legacy prefix aliases so
+/// group (`<id>`, `g<id>`, `group_<id>`) and peer (`<id>`, `u<id>`) entries never conflict.
+pub fn set_muted_in_map(
+    muted_threads: &mut std::collections::HashMap<String, i64>,
+    thread_id: &str,
+    is_group: bool,
+    until: Option<i64>,
+) {
+    let clean = clean_mute_id(thread_id);
+    if clean.is_empty() || clean == "0" {
+        return;
+    }
+    if is_group {
+        muted_threads.remove(thread_id.trim());
+        muted_threads.remove(clean);
+        muted_threads.remove(&format!("g{clean}"));
+        muted_threads.remove(&format!("G{clean}"));
+        muted_threads.remove(&format!("group_{clean}"));
+        if let Some(until_val) = until {
+            muted_threads.insert(format!("g{clean}"), until_val);
+        }
+    } else {
+        muted_threads.remove(thread_id.trim());
+        muted_threads.remove(clean);
+        muted_threads.remove(&format!("u{clean}"));
+        muted_threads.remove(&format!("U{clean}"));
+        if let Some(until_val) = until {
+            muted_threads.insert(clean.to_string(), until_val);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,6 +580,69 @@ mod tests {
         assert_eq!(state.count(), 1);
         state.read_visible(&[message("11", false)]);
         assert!(!state.has_badge());
+    }
+
+    #[test]
+    fn mute_helpers_reconcile_unprefixed_group_threads_with_server_g_prefix() {
+        let now = 1_700_000_100_i64;
+        let payload = serde_json::json!({
+            "error_code": 0,
+            "data": {
+                "chatEntries": [
+                    {"id": "7602591761395115371", "muteMode": 1, "duration": -1, "startTime": 1_700_000_000_i64},
+                    {"id": "888111", "muteMode": 1, "duration": 50, "startTime": 1_700_000_000_i64}
+                ],
+                "groupChatEntries": [
+                    {"id": "3247153953139077370", "muteMode": 1, "duration": -1, "startTime": 1_700_000_000_i64},
+                    {"id": "555666", "muteMode": 1, "duration": 3600, "startTime": 1_700_000_000_i64}
+                ]
+            }
+        });
+        let mut map = extract_mute_map(&payload, now).expect("valid mute map");
+
+        // Group threads in memory use unprefixed numeric IDs (`3247153953139077370`), whereas
+        // `extract_mute_map` stores `g3247153953139077370`.
+        assert_eq!(
+            muted_until_in_map(&map, "3247153953139077370", true, now),
+            Some(-1)
+        );
+        assert_eq!(
+            muted_until_in_map(&map, "g3247153953139077370", true, now),
+            Some(-1)
+        );
+        assert_eq!(
+            muted_until_in_map(&map, "group_555666", true, now),
+            Some(1_700_003_600)
+        );
+        // 1-1 peer with the same digits as a muted group must NOT match the group mute.
+        assert_eq!(
+            muted_until_in_map(&map, "3247153953139077370", false, now),
+            None
+        );
+        // Expired 1-1 mute (`startTime + duration <= now`) is omitted / inactive.
+        assert_eq!(muted_until_in_map(&map, "888111", false, now), None);
+
+        // Unmuting an unprefixed group clears `g<id>` and `group_<id>` aliases too.
+        map.insert("3247153953139077370".into(), -1);
+        map.insert("group_3247153953139077370".into(), -1);
+        set_muted_in_map(&mut map, "3247153953139077370", true, None);
+        assert_eq!(
+            muted_until_in_map(&map, "3247153953139077370", true, now),
+            None
+        );
+
+        assert!(thread_matches_mute_id(
+            "3247153953139077370",
+            true,
+            "g3247153953139077370",
+            true
+        ));
+        assert!(!thread_matches_mute_id(
+            "3247153953139077370",
+            false,
+            "g3247153953139077370",
+            true
+        ));
     }
 }
 

@@ -64,7 +64,12 @@ pub struct ReminderItem {
 }
 /// Loại `has:` trong search nâng cao (WaveA2).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SearchHas { Link, File, Image, Voice }
+pub enum SearchHas {
+    Link,
+    File,
+    Image,
+    Voice,
+}
 
 /// Kết quả parse query search: operators + từ tự do (WaveA2, thuần, có test).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -85,10 +90,20 @@ pub struct SearchQuery {
 fn search_day_bound_ms(day: &str, end: bool) -> Option<i64> {
     use chrono::TimeZone;
     let mut it = day.split('-');
-    let (y, mo, d): (i32, u32, u32) = (it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?);
-    if it.next().is_some() { return None; }
+    let (y, mo, d): (i32, u32, u32) = (
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+    );
+    if it.next().is_some() {
+        return None;
+    }
     let date = chrono::NaiveDate::from_ymd_opt(y, mo, d)?;
-    let dt = if end { date.and_hms_opt(23, 59, 59)? } else { date.and_hms_opt(0, 0, 0)? };
+    let dt = if end {
+        date.and_hms_opt(23, 59, 59)?
+    } else {
+        date.and_hms_opt(0, 0, 0)?
+    };
     let local = chrono::Local.from_local_datetime(&dt).single()?;
     Some(local.timestamp_millis())
 }
@@ -100,24 +115,40 @@ pub fn parse_search_query(raw: &str) -> SearchQuery {
     let mut cur = String::new();
     let mut in_q = false;
     for ch in raw.chars() {
-        if ch == '"' { in_q = !in_q; cur.push(ch); }
-        else if ch.is_whitespace() && !in_q {
-            if !cur.is_empty() { tokens.push(std::mem::take(&mut cur)); }
-        } else { cur.push(ch); }
+        if ch == '"' {
+            in_q = !in_q;
+            cur.push(ch);
+        } else if ch.is_whitespace() && !in_q {
+            if !cur.is_empty() {
+                tokens.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(ch);
+        }
     }
-    if !cur.is_empty() { tokens.push(cur); }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
     for tok in tokens {
         if tok.len() >= 2 && tok.starts_with('"') && tok.ends_with('"') {
-            let p = tok[1..tok.len()-1].trim();
-            if !p.is_empty() { q.phrases.push(p.to_string()); }
+            let p = tok[1..tok.len() - 1].trim();
+            if !p.is_empty() {
+                q.phrases.push(p.to_string());
+            }
             continue;
         }
         if let Some(v) = tok.strip_prefix("from:") {
-            let v = v.trim(); if !v.is_empty() { q.from = Some(v.to_string()); }
+            let v = v.trim();
+            if !v.is_empty() {
+                q.from = Some(v.to_string());
+            }
             continue;
         }
         if let Some(v) = tok.strip_prefix("in:") {
-            let v = v.trim(); if !v.is_empty() { q.in_thread = Some(v.to_string()); }
+            let v = v.trim();
+            if !v.is_empty() {
+                q.in_thread = Some(v.to_string());
+            }
             continue;
         }
         if let Some(v) = tok.strip_prefix("has:") {
@@ -131,13 +162,19 @@ pub fn parse_search_query(raw: &str) -> SearchQuery {
             continue;
         }
         if let Some(v) = tok.strip_prefix("before:") {
-            if let Some(ms) = search_day_bound_ms(v.trim(), true) { q.before_ms = Some(ms); }
-            else { q.words.push(tok.clone()); }
+            if let Some(ms) = search_day_bound_ms(v.trim(), true) {
+                q.before_ms = Some(ms);
+            } else {
+                q.words.push(tok.clone());
+            }
             continue;
         }
         if let Some(v) = tok.strip_prefix("after:") {
-            if let Some(ms) = search_day_bound_ms(v.trim(), false) { q.after_ms = Some(ms); }
-            else { q.words.push(tok.clone()); }
+            if let Some(ms) = search_day_bound_ms(v.trim(), false) {
+                q.after_ms = Some(ms);
+            } else {
+                q.words.push(tok.clone());
+            }
             continue;
         }
         if let Some(v) = tok.strip_prefix("is:") {
@@ -150,9 +187,14 @@ pub fn parse_search_query(raw: &str) -> SearchQuery {
         }
         if let Some(tag) = tok.strip_prefix('#') {
             let t = tag.trim_matches(|c: char| ".,;:!?()[]".contains(c));
-            if !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            if !t.is_empty()
+                && t.chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
                 q.hashtags.push(t.to_string());
-            } else { q.words.push(tok.clone()); }
+            } else {
+                q.words.push(tok.clone());
+            }
             continue;
         }
         q.words.push(tok);
@@ -177,7 +219,6 @@ pub struct StoredThread {
 /// treats `vanished: true` as authoritative: it never restores link/sticker
 /// metadata or original text from this row (gui.rs:1908).
 pub const VANISH_TOMBSTONE_JSON: &str = r#"{"vanished":true}"#;
-
 
 pub struct MessageStore {
     pub conn: Connection,
@@ -224,8 +265,8 @@ impl MessageStore {
         let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
     }
 
-     /// Open SQLite database at `path` and initialize table schemas and indices if absent.
-     pub fn open(path: &str) -> Result<Self> {
+    /// Open SQLite database at `path` and initialize table schemas and indices if absent.
+    pub fn open(path: &str) -> Result<Self> {
         let conn = if path == ":memory:" {
             Connection::open_in_memory()?
         } else {
@@ -448,47 +489,47 @@ impl MessageStore {
     /// Thêm cột vanish / bảng `thread_vanish` cho DB cũ (pre-vanish slice).
     /// Chạy an toàn nhiều lần: dò `PRAGMA table_info` rồi mới `ALTER TABLE`.
     fn ensure_vanish_schema(conn: &Connection) -> Result<()> {
-    let mut cols: Vec<String> = Vec::new();
-    if let Ok(mut stmt) = conn.prepare("PRAGMA table_info(threads)") {
-        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(1)) {
-            for c in rows.flatten() {
-                cols.push(c);
+        let mut cols: Vec<String> = Vec::new();
+        if let Ok(mut stmt) = conn.prepare("PRAGMA table_info(threads)") {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(1)) {
+                for c in rows.flatten() {
+                    cols.push(c);
+                }
             }
         }
-    }
-    if !cols.iter().any(|c| c == "vanish_duration_sec") {
-        let _ = conn.execute(
-            "ALTER TABLE threads ADD COLUMN vanish_duration_sec INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-    }
-    if !cols.iter().any(|c| c == "vanish_started_at_sec") {
-        let _ = conn.execute(
-            "ALTER TABLE threads ADD COLUMN vanish_started_at_sec INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-    }
-    if !cols.iter().any(|c| c == "last_read_msg_id") {
-        let _ = conn.execute(
-            "ALTER TABLE threads ADD COLUMN last_read_msg_id TEXT NOT NULL DEFAULT ''",
-            [],
-        );
-    }
-    if !cols.iter().any(|c| c == "contact_name") {
-        let _ = conn.execute(
-            "ALTER TABLE threads ADD COLUMN contact_name INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-    }
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS thread_vanish (
+        if !cols.iter().any(|c| c == "vanish_duration_sec") {
+            let _ = conn.execute(
+                "ALTER TABLE threads ADD COLUMN vanish_duration_sec INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
+        }
+        if !cols.iter().any(|c| c == "vanish_started_at_sec") {
+            let _ = conn.execute(
+                "ALTER TABLE threads ADD COLUMN vanish_started_at_sec INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
+        }
+        if !cols.iter().any(|c| c == "last_read_msg_id") {
+            let _ = conn.execute(
+                "ALTER TABLE threads ADD COLUMN last_read_msg_id TEXT NOT NULL DEFAULT ''",
+                [],
+            );
+        }
+        if !cols.iter().any(|c| c == "contact_name") {
+            let _ = conn.execute(
+                "ALTER TABLE threads ADD COLUMN contact_name INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
+        }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS thread_vanish (
             thread_id TEXT PRIMARY KEY,
             duration_sec INTEGER NOT NULL,
             started_at_sec INTEGER NOT NULL
         );",
-    )?;
-    Ok(())
-}
+        )?;
+        Ok(())
+    }
 
     /// Tạo bảng workspace nhóm nếu DB cũ chưa có (group notes + keyword watch).
     /// Chạy an toàn nhiều lần: chỉ `CREATE TABLE IF NOT EXISTS`.
@@ -522,9 +563,9 @@ impl MessageStore {
             );
             CREATE INDEX IF NOT EXISTS idx_saved_thread ON saved_items(thread_id);
             CREATE INDEX IF NOT EXISTS idx_saved_due ON saved_items(due_at);",
-         )?;
-         Ok(())
-     }
+        )?;
+        Ok(())
+    }
     /// Tạo bảng nháp + nhắc tin (WaveA1). `drafts`: 1 row/thread; `message_reminders`:
     /// 1 row/lần nhắc, `due_at` epoch giây. Chạy an toàn nhiều lần.
     fn ensure_draft_reminder_schema(conn: &Connection) -> Result<()> {
@@ -547,7 +588,6 @@ impl MessageStore {
         )?;
         Ok(())
     }
-
 
     /// Tạo bảng lịch sử bản cũ của tin đã sửa (WaveA3). Mỗi lần sửa append 1 row
     /// `(msg_id, thread_id, old_text, edited_at)`. Chạy an toàn nhiều lần.
@@ -616,7 +656,6 @@ impl MessageStore {
         Ok(())
     }
 
-
     /// Lưu 1 bản cũ trước khi thay text mới. `edited_at`: epoch ms.
     pub fn save_message_edit(
         &mut self,
@@ -672,7 +711,9 @@ impl MessageStore {
         trigger_arg: &str,
         enabled: bool,
     ) -> Result<i64> {
-        if thread_id.is_empty() || name.trim().is_empty() { return Ok(0); }
+        if thread_id.is_empty() || name.trim().is_empty() {
+            return Ok(0);
+        }
         let _ = Self::ensure_script_schema(&self.conn);
         let now = crate::login::unix_now();
         self.conn.execute(
@@ -699,7 +740,16 @@ impl MessageStore {
         let rows = self.conn.execute(
             "UPDATE thread_scripts SET name = ?2, code = ?3, trigger = ?4, trigger_arg = ?5,
                 enabled = ?6, updated_at = ?7 WHERE id = ?1 AND thread_id = ?8",
-            params![id, name.trim(), code, trigger, trigger_arg, i64::from(enabled), now, thread_id],
+            params![
+                id,
+                name.trim(),
+                code,
+                trigger,
+                trigger_arg,
+                i64::from(enabled),
+                now,
+                thread_id
+            ],
         )?;
         Ok(rows > 0)
     }
@@ -727,7 +777,9 @@ impl MessageStore {
 
     /// Liệt kê script của 1 thread (mới → cũ theo id DESC).
     pub fn list_thread_scripts(&self, thread_id: &str) -> Vec<crate::thread_script::ThreadScript> {
-        if thread_id.is_empty() { return Vec::new(); }
+        if thread_id.is_empty() {
+            return Vec::new();
+        }
         let mut stmt = match self.conn.prepare(
             "SELECT id, thread_id, name, code, trigger, trigger_arg, enabled, created_at, updated_at
              FROM thread_scripts WHERE thread_id = ?1 ORDER BY id DESC",
@@ -755,8 +807,13 @@ impl MessageStore {
     }
 
     /// Liệt kê script đang bật của các thread cho trước (worker tick: chỉ thread có script mới chạy).
-    pub fn list_enabled_scripts_for(&self, thread_ids: &[String]) -> Vec<crate::thread_script::ThreadScript> {
-        if thread_ids.is_empty() { return Vec::new(); }
+    pub fn list_enabled_scripts_for(
+        &self,
+        thread_ids: &[String],
+    ) -> Vec<crate::thread_script::ThreadScript> {
+        if thread_ids.is_empty() {
+            return Vec::new();
+        }
         let placeholders = thread_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT id, thread_id, name, code, trigger, trigger_arg, enabled, created_at, updated_at
@@ -766,8 +823,10 @@ impl MessageStore {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let params_vec: Vec<&dyn rusqlite::ToSql> =
-            thread_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let params_vec: Vec<&dyn rusqlite::ToSql> = thread_ids
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
         stmt.query_map(params_vec.as_slice(), |r| {
             let enabled: i64 = r.get(6).unwrap_or(1);
             Ok(crate::thread_script::ThreadScript {
@@ -816,7 +875,9 @@ impl MessageStore {
 
     /// Thread có script enabled nào khớp event tin nhắn không (gate rẻ cho on_message).
     pub fn thread_has_message_scripts(&self, thread_id: &str) -> bool {
-        if thread_id.is_empty() { return false; }
+        if thread_id.is_empty() {
+            return false;
+        }
         let mut stmt = match self.conn.prepare(
             "SELECT trigger, trigger_arg FROM thread_scripts
              WHERE thread_id = ?1 AND enabled != 0",
@@ -840,10 +901,11 @@ impl MessageStore {
         })
     }
 
-
     /// Đọc 1 KV riêng của thread. Chưa có → `None`.
     pub fn thread_kv_get(&self, thread_id: &str, key: &str) -> Option<String> {
-        if thread_id.is_empty() || key.is_empty() { return None; }
+        if thread_id.is_empty() || key.is_empty() {
+            return None;
+        }
         self.conn
             .query_row(
                 "SELECT value_json FROM thread_data WHERE thread_id = ?1 AND key = ?2",
@@ -855,7 +917,9 @@ impl MessageStore {
 
     /// Ghi 1 KV riêng của thread (upsert).
     pub fn thread_kv_set(&mut self, thread_id: &str, key: &str, value_json: &str) -> Result<()> {
-        if thread_id.is_empty() || key.is_empty() { return Ok(()); }
+        if thread_id.is_empty() || key.is_empty() {
+            return Ok(());
+        }
         let _ = Self::ensure_script_schema(&self.conn);
         let now = crate::login::unix_now();
         self.conn.execute(
@@ -902,7 +966,8 @@ impl MessageStore {
                 last_access: row.get(8)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(anyhow::Error::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(anyhow::Error::from)
     }
 
     /// Mark a TG message as bridge-originated (echo-guard).
@@ -929,15 +994,21 @@ impl MessageStore {
     /// Delete one bridge mapping (file itself removed by caller).
     pub fn bridge_file_delete(&mut self, msg_id: &str) -> Result<()> {
         let _ = Self::ensure_script_schema(&self.conn);
-        self.conn.execute("DELETE FROM bridge_files WHERE msg_id = ?1", rusqlite::params![msg_id])?;
+        self.conn.execute(
+            "DELETE FROM bridge_files WHERE msg_id = ?1",
+            rusqlite::params![msg_id],
+        )?;
         Ok(())
     }
 
     pub fn thread_kv_list(&self, thread_id: &str) -> Vec<String> {
-        if thread_id.is_empty() { return Vec::new(); }
-        let mut stmt = match self.conn.prepare(
-            "SELECT key FROM thread_data WHERE thread_id = ?1 ORDER BY key ASC",
-        ) {
+        if thread_id.is_empty() {
+            return Vec::new();
+        }
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT key FROM thread_data WHERE thread_id = ?1 ORDER BY key ASC")
+        {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
@@ -948,8 +1019,16 @@ impl MessageStore {
     }
 
     /// Ghi 1 dòng log chạy script; giữ tối đa 200 dòng/thread (xoá cũ nhất).
-    pub fn push_script_log(&mut self, thread_id: &str, name: &str, level: &str, msg: &str) -> Result<()> {
-        if thread_id.is_empty() { return Ok(()); }
+    pub fn push_script_log(
+        &mut self,
+        thread_id: &str,
+        name: &str,
+        level: &str,
+        msg: &str,
+    ) -> Result<()> {
+        if thread_id.is_empty() {
+            return Ok(());
+        }
         let _ = Self::ensure_script_schema(&self.conn);
         let now = crate::login::unix_now();
         let short: String = msg.chars().take(2000).collect();
@@ -968,8 +1047,14 @@ impl MessageStore {
     }
 
     /// Đọc log chạy script của 1 thread (mới nhất trước, tối đa `limit`).
-    pub fn list_script_logs(&self, thread_id: &str, limit: usize) -> Vec<crate::thread_script::ScriptLog> {
-        if thread_id.is_empty() { return Vec::new(); }
+    pub fn list_script_logs(
+        &self,
+        thread_id: &str,
+        limit: usize,
+    ) -> Vec<crate::thread_script::ScriptLog> {
+        if thread_id.is_empty() {
+            return Vec::new();
+        }
         let lim = limit.clamp(1, 200) as i64;
         let mut stmt = match self.conn.prepare(
             "SELECT thread_id, name, level, msg, ts FROM thread_script_logs
@@ -994,7 +1079,9 @@ impl MessageStore {
 
     /// Xoá log của 1 thread (nút Xoá trong UI).
     pub fn clear_script_logs(&mut self, thread_id: &str) -> Result<()> {
-        if thread_id.is_empty() { return Ok(()); }
+        if thread_id.is_empty() {
+            return Ok(());
+        }
         let _ = Self::ensure_script_schema(&self.conn);
         self.conn.execute(
             "DELETE FROM thread_script_logs WHERE thread_id = ?1",
@@ -1034,8 +1121,15 @@ impl MessageStore {
 
     // ── Saved items toàn cục (WaveA2) ─────────────────────────────
     /// Lưu tin (star = saved, không note). Trả `true` nếu thêm mới.
-    pub fn save_message_item(&mut self, msg_id: &str, thread_id: &str, created_at: i64) -> Result<bool> {
-        if msg_id.is_empty() { return Ok(false); }
+    pub fn save_message_item(
+        &mut self,
+        msg_id: &str,
+        thread_id: &str,
+        created_at: i64,
+    ) -> Result<bool> {
+        if msg_id.is_empty() {
+            return Ok(false);
+        }
         let rows = self.conn.execute(
             "INSERT OR IGNORE INTO saved_items (msg_id, thread_id, note, due_at, created_at)
              VALUES (?1, ?2, '', 0, ?3)",
@@ -1046,25 +1140,44 @@ impl MessageStore {
 
     /// Bỏ lưu tin. Trả `true` nếu đã xoá.
     pub fn unsave_message_item(&mut self, msg_id: &str) -> Result<bool> {
-        if msg_id.is_empty() { return Ok(false); }
-        let rows = self.conn.execute("DELETE FROM saved_items WHERE msg_id = ?1", params![msg_id])?;
+        if msg_id.is_empty() {
+            return Ok(false);
+        }
+        let rows = self
+            .conn
+            .execute("DELETE FROM saved_items WHERE msg_id = ?1", params![msg_id])?;
         Ok(rows > 0)
     }
 
     /// Tin có đang lưu không?
     pub fn is_message_saved(&self, msg_id: &str) -> bool {
-        if msg_id.is_empty() { return false; }
-        self.conn.query_row(
-            "SELECT 1 FROM saved_items WHERE msg_id = ?1",
-            params![msg_id],
-            |_| Ok(()),
-        ).is_ok()
+        if msg_id.is_empty() {
+            return false;
+        }
+        self.conn
+            .query_row(
+                "SELECT 1 FROM saved_items WHERE msg_id = ?1",
+                params![msg_id],
+                |_| Ok(()),
+            )
+            .is_ok()
     }
 
     /// Ghi chú / hạn cho tin đã lưu. Tin chưa lưu → upsert luôn.
-    pub fn set_saved_note_due(&mut self, msg_id: &str, thread_id: &str, note: &str, due_at: i64) -> Result<()> {
-        if msg_id.is_empty() { return Ok(()); }
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    pub fn set_saved_note_due(
+        &mut self,
+        msg_id: &str,
+        thread_id: &str,
+        note: &str,
+        due_at: i64,
+    ) -> Result<()> {
+        if msg_id.is_empty() {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         self.conn.execute(
             "INSERT INTO saved_items (msg_id, thread_id, note, due_at, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1085,21 +1198,36 @@ impl MessageStore {
              LEFT JOIN messages m ON m.msg_id = s.msg_id
              LEFT JOIN threads t ON t.thread_id = s.thread_id
              ORDER BY s.created_at DESC, s.msg_id DESC",
-        ) { Ok(s) => s, Err(_) => return Vec::new() };
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
         stmt.query_map([], |r| {
             let is_group: i64 = r.get(9).unwrap_or(0);
             Ok(SavedItem {
-                msg_id: r.get(0)?, thread_id: r.get(1)?, note: r.get(2)?,
-                due_at: r.get(3)?, created_at: r.get(4)?,
-                text: r.get(5)?, sender_name: r.get(6)?, ts: r.get(7)?,
-                thread_name: r.get(8)?, is_group: is_group != 0,
+                msg_id: r.get(0)?,
+                thread_id: r.get(1)?,
+                note: r.get(2)?,
+                due_at: r.get(3)?,
+                created_at: r.get(4)?,
+                text: r.get(5)?,
+                sender_name: r.get(6)?,
+                ts: r.get(7)?,
+                thread_name: r.get(8)?,
+                is_group: is_group != 0,
             })
-        }).ok().map(|rows| rows.flatten().collect()).unwrap_or_default()
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
     }
 
     /// Tin đã lưu tới hạn (`due_at > 0 && due_at <= now`).
     pub fn due_saved_items(&self, now_sec: i64) -> Vec<SavedItem> {
-        self.list_saved_items().into_iter().filter(|s| s.due_at > 0 && s.due_at <= now_sec).collect()
+        self.list_saved_items()
+            .into_iter()
+            .filter(|s| s.due_at > 0 && s.due_at <= now_sec)
+            .collect()
     }
     // ── Drafts + message reminders (WaveA1) ─────────────────────────
     /// Lấy nháp composer của 1 thread. DB thiếu bảng → `None` (không crash tick nền).
@@ -1109,7 +1237,9 @@ impl MessageStore {
         }
         let mut stmt = self
             .conn
-            .prepare("SELECT thread_id, text, reply_ref, updated_at FROM drafts WHERE thread_id = ?1")
+            .prepare(
+                "SELECT thread_id, text, reply_ref, updated_at FROM drafts WHERE thread_id = ?1",
+            )
             .ok()?;
         stmt.query_row(params![thread_id], |r| {
             Ok(DraftEntry {
@@ -1123,15 +1253,22 @@ impl MessageStore {
     }
 
     /// Lưu/đè nháp composer của 1 thread (text rỗng + không reply → xoá row).
-    pub fn set_draft(&mut self, thread_id: &str, text: &str, reply_ref: &str, updated_at: i64) -> Result<()> {
+    pub fn set_draft(
+        &mut self,
+        thread_id: &str,
+        text: &str,
+        reply_ref: &str,
+        updated_at: i64,
+    ) -> Result<()> {
         if thread_id.is_empty() {
             return Ok(());
         }
         let _ = Self::ensure_draft_reminder_schema(&self.conn);
         if text.trim().is_empty() && reply_ref.trim().is_empty() {
-            let _ = self
-                .conn
-                .execute("DELETE FROM drafts WHERE thread_id = ?1", params![thread_id]);
+            let _ = self.conn.execute(
+                "DELETE FROM drafts WHERE thread_id = ?1",
+                params![thread_id],
+            );
             return Ok(());
         }
         self.conn.execute(
@@ -1150,17 +1287,19 @@ impl MessageStore {
             return Ok(());
         }
         let _ = Self::ensure_draft_reminder_schema(&self.conn);
-        let _ = self
-            .conn
-            .execute("DELETE FROM drafts WHERE thread_id = ?1", params![thread_id]);
+        let _ = self.conn.execute(
+            "DELETE FROM drafts WHERE thread_id = ?1",
+            params![thread_id],
+        );
         Ok(())
     }
 
     /// Liệt kê mọi thread đang có nháp (để vẽ badge "nháp" ở sidebar).
     pub fn list_draft_threads(&self) -> Vec<String> {
-        let mut stmt = match self.conn.prepare(
-            "SELECT thread_id FROM drafts WHERE TRIM(text) != '' OR TRIM(reply_ref) != ''",
-        ) {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT thread_id FROM drafts WHERE TRIM(text) != '' OR TRIM(reply_ref) != ''")
+        {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
@@ -1255,10 +1394,9 @@ impl MessageStore {
         let ids: Vec<i64> = due.iter().map(|r| r.id).collect();
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("DELETE FROM message_reminders WHERE id IN ({placeholders})");
-        let _ = self.conn.execute(
-            &sql,
-            rusqlite::params_from_iter(ids.iter()),
-        );
+        let _ = self
+            .conn
+            .execute(&sql, rusqlite::params_from_iter(ids.iter()));
         due
     }
 
@@ -1274,12 +1412,19 @@ impl MessageStore {
     // ── Search operators (WaveA2) ─────────────────────────────────
     /// Query SQLite messages với operators: from:, in:, has:link|file|image|voice,
     /// before:/after: (YYYY-MM-DD), is:starred|pinned, "cụm chính xác", #hashtag.
-    pub fn search_messages_advanced(&self, query: &crate::store::SearchQuery, limit: usize) -> Result<Vec<StoredMessage>> {
+    pub fn search_messages_advanced(
+        &self,
+        query: &crate::store::SearchQuery,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>> {
         let mut sql = String::from(
             "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json FROM messages WHERE 1 = 1",
         );
         // Mỗi điều kiện thêm 1 placeholder `?` để rusqlite bind đúng thứ tự.
-        enum P { S(String), I(i64) }
+        enum P {
+            S(String),
+            I(i64),
+        }
         let mut args: Vec<P> = Vec::new();
         let like = |s: &str| format!("%{}%", s.replace('%', "\\%").replace('_', "\\_"));
         if let Some(f) = &query.from {
@@ -1335,12 +1480,14 @@ impl MessageStore {
         while let Some(row) = rows.next()? {
             let is_outgoing_num: i64 = row.get(7)?;
             out.push(StoredMessage {
-                msg_id: row.get(0)?, thread_id: row.get(1)?,
+                msg_id: row.get(0)?,
+                thread_id: row.get(1)?,
                 sender_id: row.get(2).unwrap_or_default(),
                 sender_name: row.get(3).unwrap_or_default(),
                 text: row.get(4).unwrap_or_default(),
                 msg_type: row.get(5).unwrap_or_default(),
-                ts: row.get(6)?, is_outgoing: is_outgoing_num != 0,
+                ts: row.get(6)?,
+                is_outgoing: is_outgoing_num != 0,
                 raw_json: row.get(8).unwrap_or_default(),
             });
         }
@@ -1418,8 +1565,7 @@ impl MessageStore {
             ],
         )?;
         let trimmed = msg.text.trim();
-        let is_tombstone =
-            msg.raw_json.is_empty() && trimmed == crate::chat::VANISH_EXPIRED_TEXT;
+        let is_tombstone = msg.raw_json.is_empty() && trimmed == crate::chat::VANISH_EXPIRED_TEXT;
         let is_incoming_undo = !is_tombstone
             && (trimmed == "[Tin nhắn đã thu hồi]"
                 || msg.msg_type == "chat.undo"
@@ -1428,12 +1574,7 @@ impl MessageStore {
             if is_tombstone {
                 let _ = self.conn.execute(
                     "UPDATE messages SET raw_json = ?1, msg_type = ?2, text = ?4 WHERE msg_id = ?3",
-                    params![
-                        VANISH_TOMBSTONE_JSON,
-                        msg.msg_type,
-                        msg.msg_id,
-                        msg.text
-                    ],
+                    params![VANISH_TOMBSTONE_JSON, msg.msg_type, msg.msg_id, msg.text],
                 );
             } else if is_incoming_undo {
                 let _ = self.conn.execute(
@@ -1692,7 +1833,11 @@ impl MessageStore {
             ],
         )?;
         if vanish_from_user {
-            self.upsert_thread_vanish(&t.thread_id, t.vanish_duration_sec, t.vanish_started_at_sec)?;
+            self.upsert_thread_vanish(
+                &t.thread_id,
+                t.vanish_duration_sec,
+                t.vanish_started_at_sec,
+            )?;
         }
         Ok(())
     }
@@ -1918,10 +2063,38 @@ impl MessageStore {
     }
 
     /// Hydrate `threads` with persisted threads and message history from SQLite.
-    /// Returns the total number of messages loaded into `threads`.
+    ///
+    /// # Errors
+    /// Returns an error if the SQLite read transaction or message query fails.
     pub fn hydrate_threads(
         &self,
         threads: &mut Vec<Thread>,
+        limit_per_thread: usize,
+    ) -> Result<usize> {
+        self.hydrate_threads_inner(threads, None, limit_per_thread)
+    }
+
+    /// Hydrate only the conversations whose IDs appear in `target_ids`, avoiding full-table
+    /// message scans on incremental Sync V2 / Sync V1 batches.
+    ///
+    /// # Errors
+    /// Returns an error if the SQLite read transaction or message query fails.
+    pub fn hydrate_threads_subset(
+        &self,
+        threads: &mut Vec<Thread>,
+        target_ids: &std::collections::HashSet<String>,
+        limit_per_thread: usize,
+    ) -> Result<usize> {
+        if target_ids.is_empty() {
+            return Ok(0);
+        }
+        self.hydrate_threads_inner(threads, Some(target_ids), limit_per_thread)
+    }
+
+    fn hydrate_threads_inner(
+        &self,
+        threads: &mut Vec<Thread>,
+        filter_ids: Option<&std::collections::HashSet<String>>,
         limit_per_thread: usize,
     ) -> Result<usize> {
         crate::chat::deduplicate_threads(threads, None);
@@ -1931,6 +2104,11 @@ impl MessageStore {
             if st.thread_id.is_empty() || st.thread_id == "0" {
                 continue;
             }
+            if let Some(wanted) = filter_ids {
+                if !wanted.contains(&st.thread_id) {
+                    continue;
+                }
+            }
             if let Some(existing) = threads.iter_mut().find(|t| t.id == st.thread_id) {
                 if !st.name.trim().is_empty() {
                     if st_contact_name {
@@ -1938,7 +2116,10 @@ impl MessageStore {
                     } else if !existing.presentation.contact_name
                         && !crate::chat::is_placeholder_thread_name(&st.name, &st.thread_id)
                         && (existing.name.trim().is_empty()
-                            || crate::chat::is_placeholder_thread_name(&existing.name, &existing.id)
+                            || crate::chat::is_placeholder_thread_name(
+                                &existing.name,
+                                &existing.id,
+                            )
                             || crate::chat::is_generic_thread_name(&existing.name))
                     {
                         existing.name = st.name.clone();
@@ -2016,6 +2197,11 @@ impl MessageStore {
 
         let mut loaded_count = 0;
         for t in threads.iter_mut() {
+            if let Some(wanted) = filter_ids {
+                if !wanted.contains(&t.id) {
+                    continue;
+                }
+            }
             let before = t.messages.len();
             let tid = t.id.clone();
             t.messages.retain(|m| {
@@ -2209,8 +2395,7 @@ impl MessageStore {
                 } else {
                     parsed_kind
                 };
-                if sm.msg_type == "chat.ecall"
-                    || link_title.as_deref() == Some("sendBubbleMessage")
+                if sm.msg_type == "chat.ecall" || link_title.as_deref() == Some("sendBubbleMessage")
                 {
                     if !final_text.trim_start().starts_with("📞")
                         && !final_text.trim_start().starts_with("📹")
@@ -2475,10 +2660,12 @@ impl From<&ChatMessage> for StoredMessage {
     }
 }
 
-
 /// Dựng `VanishSetting` từ hàng `threads` (ưu tiên), fallback bảng phụ `thread_vanish`.
 /// `None` = tắt.
-fn vanish_from_stored(st: &StoredThread, store: &MessageStore) -> Option<crate::chat::VanishSetting> {
+fn vanish_from_stored(
+    st: &StoredThread,
+    store: &MessageStore,
+) -> Option<crate::chat::VanishSetting> {
     if st.vanish_duration_sec > 0 {
         return Some(crate::chat::VanishSetting {
             duration_sec: st.vanish_duration_sec,
@@ -2487,10 +2674,12 @@ fn vanish_from_stored(st: &StoredThread, store: &MessageStore) -> Option<crate::
     }
     store
         .load_thread_vanish(&st.thread_id)
-        .map(|(duration_sec, started_at_sec)| crate::chat::VanishSetting {
-            duration_sec,
-            started_at_sec,
-        })
+        .map(
+            |(duration_sec, started_at_sec)| crate::chat::VanishSetting {
+                duration_sec,
+                started_at_sec,
+            },
+        )
 }
 
 /// Áp cấu hình vanish đã lưu vào thread có sẵn (không đè vanish đang bật trong RAM).
@@ -2545,12 +2734,45 @@ pub fn persist_received_messages(store: &mut MessageStore, threads: &[Thread]) -
     persist_threads_in_transaction(store, threads, false)
 }
 
+/// Persist a batch of synced thread shells and decoded messages inside a single SQLite
+/// transaction without overwriting per-thread vanish or read-point settings.
+///
+/// # Errors
+/// Returns an error when the transaction or any row write fails.
+///
+/// # Invariants
+/// - INV-4: message rows remain idempotent by `msg_id` (`INSERT OR IGNORE`).
+pub fn persist_synced_batch(
+    store: &mut MessageStore,
+    threads: &[StoredThread],
+    messages: &[StoredMessage],
+) -> Result<usize> {
+    store.conn.execute_batch("BEGIN")?;
+    let res = (|| -> Result<usize> {
+        for st in threads {
+            if !st.thread_id.is_empty() && st.thread_id != "0" {
+                store.upsert_thread(st)?;
+            }
+        }
+        let mut inserted = 0;
+        for sm in messages {
+            if store.upsert_message(sm)? {
+                inserted += 1;
+            }
+        }
+        Ok(inserted)
+    })();
+    store
+        .conn
+        .execute_batch(if res.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+    res
+}
+
 fn persist_threads_in_transaction(
     store: &mut MessageStore,
     threads: &[Thread],
     with_user_state: bool,
 ) -> Result<usize> {
-    // One transaction for the whole snapshot: in autocommit every row was its own fsync.
     store.conn.execute_batch("BEGIN")?;
     let res = persist_threads_inner(store, threads, with_user_state);
     store
@@ -3536,7 +3758,9 @@ mod tests {
         assert!(store.save_message_item("m1", "t1", 100).unwrap());
         assert!(!store.save_message_item("m1", "t1", 100).unwrap());
         assert!(store.is_message_saved("m1"));
-        store.set_saved_note_due("m1", "t1", "xem lại", 200).unwrap();
+        store
+            .set_saved_note_due("m1", "t1", "xem lại", 200)
+            .unwrap();
         let items = store.list_saved_items();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].note, "xem lại");
@@ -3567,19 +3791,25 @@ mod tests {
             ("a1", "Long", "[Hình ảnh] beach", "chat.photo"),
             ("a2", "Nam", "hello world", "chat.text"),
         ] {
-            store.upsert_message(&StoredMessage {
-                msg_id: id.into(), thread_id: "t1".into(),
-                sender_id: sender.into(), sender_name: sender.into(),
-                text: text.into(), msg_type: mt.into(), ts: 1700000000000,
-                is_outgoing: false, raw_json: String::new(),
-            }).unwrap();
+            store
+                .upsert_message(&StoredMessage {
+                    msg_id: id.into(),
+                    thread_id: "t1".into(),
+                    sender_id: sender.into(),
+                    sender_name: sender.into(),
+                    text: text.into(),
+                    msg_type: mt.into(),
+                    ts: 1700000000000,
+                    is_outgoing: false,
+                    raw_json: String::new(),
+                })
+                .unwrap();
         }
         let q = parse_search_query("from:Long has:image");
         let hits = store.search_messages_advanced(&q, 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].msg_id, "a1");
     }
-
 
     #[test]
     fn local_time_when_hydrating_seconds_and_milliseconds() {
@@ -3792,7 +4022,10 @@ mod tests {
             })
             .unwrap();
         let got = store.all_threads().unwrap();
-        assert_eq!(got[0].vanish_duration_sec, 3600, "history upsert cleared vanish");
+        assert_eq!(
+            got[0].vanish_duration_sec, 3600,
+            "history upsert cleared vanish"
+        );
         assert_eq!(store.load_thread_vanish("g1"), Some((3600, 1000)));
         // Explicit user disable DOES clear (intent path from persist_threads).
         store
@@ -3841,10 +4074,7 @@ mod tests {
             ..Default::default()
         }];
         store.hydrate_threads(&mut fresh, 10).unwrap();
-        assert_eq!(
-            fresh[0].unread.last_seen_id.as_deref(),
-            Some("100")
-        );
+        assert_eq!(fresh[0].unread.last_seen_id.as_deref(), Some("100"));
         // Direct merge helper: newer stored wins, older stored ignored.
         let mut u = crate::unread::UnreadState {
             last_seen_id: Some("200".into()),
@@ -3888,7 +4118,10 @@ mod tests {
             is_outgoing: false,
             raw_json: String::new(),
         };
-        assert!(!store.upsert_message(&expired).unwrap(), "tombstone must UPDATE, not insert");
+        assert!(
+            !store.upsert_message(&expired).unwrap(),
+            "tombstone must UPDATE, not insert"
+        );
         let rows = store.messages_for("t1", 10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, crate::chat::VANISH_EXPIRED_TEXT);
@@ -3907,8 +4140,15 @@ mod tests {
             .unwrap();
         let mut threads: Vec<Thread> = Vec::new();
         store.hydrate_threads(&mut threads, 10).unwrap();
-        let t = threads.iter().find(|t| t.id == "t1").expect("thread hydrated");
-        let m = t.messages.iter().find(|m| m.id == "m1").expect("msg hydrated");
+        let t = threads
+            .iter()
+            .find(|t| t.id == "t1")
+            .expect("thread hydrated");
+        let m = t
+            .messages
+            .iter()
+            .find(|m| m.id == "m1")
+            .expect("msg hydrated");
         assert_eq!(m.text, crate::chat::VANISH_EXPIRED_TEXT);
         assert!(m.link_url.is_none(), "hydrate restored expired link");
         // Sweep path skips tombstones (no re-persist loop): simulate the check.
@@ -4028,10 +4268,21 @@ mod tests {
             ..Default::default()
         }];
         store.hydrate_threads(&mut threads, 10).unwrap();
-        let hp = threads[0].messages.iter().find(|m| m.id == "m_photo").unwrap();
+        let hp = threads[0]
+            .messages
+            .iter()
+            .find(|m| m.id == "m_photo")
+            .unwrap();
         assert_eq!(hp.text, "[Đã thu hồi] [Hình ảnh] Ảnh hợp đồng");
-        assert_eq!(hp.link_url.as_deref(), Some("https://f60-zpg-r.zdn.vn/photo.jpg"));
-        let hs = threads[0].messages.iter().find(|m| m.id == "m_stk").unwrap();
+        assert_eq!(
+            hp.link_url.as_deref(),
+            Some("https://f60-zpg-r.zdn.vn/photo.jpg")
+        );
+        let hs = threads[0]
+            .messages
+            .iter()
+            .find(|m| m.id == "m_stk")
+            .unwrap();
         assert_eq!(hs.text, "[Đã thu hồi] [Nhãn dán]");
         assert_eq!(hs.sticker_id, Some(18009));
     }
@@ -4496,5 +4747,72 @@ mod tests {
 
         drop(st);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_synced_batch_and_subset_hydration_are_atomic_and_idempotent() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let batch_threads = vec![
+            StoredThread {
+                thread_id: "peer_1".into(),
+                name: "An".into(),
+                is_group: false,
+                last_ts: 2000,
+                vanish_duration_sec: 0,
+                vanish_started_at_sec: 0,
+                last_read_msg_id: String::new(),
+            },
+            StoredThread {
+                thread_id: "grp_2".into(),
+                name: "Nhóm Dev".into(),
+                is_group: true,
+                last_ts: 3000,
+                vanish_duration_sec: 0,
+                vanish_started_at_sec: 0,
+                last_read_msg_id: String::new(),
+            },
+        ];
+        let batch_msgs = vec![
+            StoredMessage {
+                msg_id: "m1".into(),
+                thread_id: "peer_1".into(),
+                sender_id: "peer_1".into(),
+                sender_name: "An".into(),
+                text: "Xin chào".into(),
+                msg_type: "chat.text".into(),
+                ts: 2000,
+                is_outgoing: false,
+                raw_json: String::new(),
+            },
+            StoredMessage {
+                msg_id: "m2".into(),
+                thread_id: "grp_2".into(),
+                sender_id: "u9".into(),
+                sender_name: "Bình".into(),
+                text: "Báo cáo tuần".into(),
+                msg_type: "chat.text".into(),
+                ts: 3000,
+                is_outgoing: false,
+                raw_json: String::new(),
+            },
+        ];
+
+        let inserted = persist_synced_batch(&mut store, &batch_threads, &batch_msgs).unwrap();
+        assert_eq!(inserted, 2);
+        // Re-delivering the same batch must insert 0 duplicates (INV-4).
+        let duplicate = persist_synced_batch(&mut store, &batch_threads, &batch_msgs).unwrap();
+        assert_eq!(duplicate, 0);
+
+        let mut subset_target = std::collections::HashSet::new();
+        subset_target.insert("grp_2".to_string());
+        let mut threads = Vec::new();
+        let loaded = store
+            .hydrate_threads_subset(&mut threads, &subset_target, 50)
+            .unwrap();
+        assert_eq!(loaded, 1);
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "grp_2");
+        assert_eq!(threads[0].messages.len(), 1);
+        assert_eq!(threads[0].messages[0].text, "Báo cáo tuần");
     }
 }

@@ -235,7 +235,11 @@ impl ChatMessage {
         if self.link_title.as_deref() == Some("sendBubbleMessage") {
             return None;
         }
-        if self.link_url.as_deref().is_some_and(|u| !u.trim().is_empty()) {
+        if self
+            .link_url
+            .as_deref()
+            .is_some_and(|u| !u.trim().is_empty())
+        {
             return None;
         }
         let banner_thumb = self
@@ -2065,6 +2069,7 @@ pub(crate) fn pick_str(v: &Value, keys: &[&str]) -> Option<String> {
 }
 
 /// Allocate a millisecond-shaped request ID once per send, including simultaneous sends.
+#[allow(deprecated)]
 pub(crate) fn next_client_message_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static LAST_ID: AtomicU64 = AtomicU64::new(0);
@@ -2714,7 +2719,10 @@ fn probe_video_metadata(path: &std::path::Path, bytes: &[u8]) -> (u64, u32, u32)
             let mut nums = txt.lines().filter_map(|l| l.trim().parse::<f64>().ok());
             let w = nums.next().map(|v| v as u32).unwrap_or(0);
             let h = nums.next().map(|v| v as u32).unwrap_or(0);
-            let dur = nums.next().map(|v| (v * 1000.0).max(0.0) as u64).unwrap_or(0);
+            let dur = nums
+                .next()
+                .map(|v| (v * 1000.0).max(0.0) as u64)
+                .unwrap_or(0);
             if w > 0 || h > 0 || dur > 0 {
                 return (
                     dur,
@@ -2734,21 +2742,19 @@ fn generate_video_thumbnail_jpeg(
 ) -> Option<Vec<u8>> {
     for ss in ["00:00:00.5", "0"] {
         let mut cmd = std::process::Command::new("ffmpeg");
-        cmd.args(["-y", "-ss", ss, "-i"])
-            .arg(video_path)
-            .args([
-                "-vframes",
-                "1",
-                "-vf",
-                "scale=640:-2",
-                "-f",
-                "image2",
-                "-vcodec",
-                "mjpeg",
-                "-q:v",
-                "4",
-                "pipe:1",
-            ]);
+        cmd.args(["-y", "-ss", ss, "-i"]).arg(video_path).args([
+            "-vframes",
+            "1",
+            "-vf",
+            "scale=640:-2",
+            "-f",
+            "image2",
+            "-vcodec",
+            "mjpeg",
+            "-q:v",
+            "4",
+            "pipe:1",
+        ]);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -2761,7 +2767,11 @@ fn generate_video_thumbnail_jpeg(
         }
     }
 
-    let (tw, th) = if height > width { (270u32, 480u32) } else { (480u32, 270u32) };
+    let (tw, th) = if height > width {
+        (270u32, 480u32)
+    } else {
+        (480u32, 270u32)
+    };
     let mut img = image::RgbImage::from_pixel(tw, th, image::Rgb([24, 30, 42]));
     let cx = (tw / 2) as i32;
     let cy = (th / 2) as i32;
@@ -2778,7 +2788,10 @@ fn generate_video_thumbnail_jpeg(
     }
     let mut buf = Vec::new();
     image::DynamicImage::ImageRgb8(img)
-        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+        .write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageFormat::Jpeg,
+        )
         .ok()?;
     Some(buf)
 }
@@ -2817,12 +2830,21 @@ async fn upload_video_thumbnail(
         s.common_params()
     );
     let up_raw = s
-        .post_multipart(&url, "chunkContent", "video_thumb.jpg", "image/jpeg", jpeg_bytes)
+        .post_multipart(
+            &url,
+            "chunkContent",
+            "video_thumb.jpg",
+            "image/jpeg",
+            jpeg_bytes,
+        )
         .await
         .ok()?;
     let dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
     let data_node = dec.get("data").unwrap_or(&dec);
-    pick_str(data_node, &["normalUrl", "thumbUrl", "hdUrl", "oriUrl", "url"])
+    pick_str(
+        data_node,
+        &["normalUrl", "thumbUrl", "hdUrl", "oriUrl", "url"],
+    )
 }
 
 pub(crate) fn build_native_video_forward_params(
@@ -5418,14 +5440,20 @@ mod text_emoticon_tests {
     #[test]
     fn known_codes_become_emoji_and_spacing_is_kept() {
         assert_eq!(text_emoticons_to_emoji("/-strong"), "👍");
-        assert_eq!(text_emoticons_to_emoji("ok /-heart\n/-strong "), "ok ❤️\n👍 ");
+        assert_eq!(
+            text_emoticons_to_emoji("ok /-heart\n/-strong "),
+            "ok ❤️\n👍 "
+        );
     }
 
     #[test]
     fn unknown_codes_and_embedded_text_are_untouched() {
         assert_eq!(text_emoticons_to_emoji("/-xyz"), "/-xyz");
         assert_eq!(text_emoticons_to_emoji("a/-strong"), "a/-strong");
-        assert_eq!(text_emoticons_to_emoji("path /-strong/x"), "path /-strong/x");
+        assert_eq!(
+            text_emoticons_to_emoji("path /-strong/x"),
+            "path /-strong/x"
+        );
         // Code stays verbatim (fenced blocks and inline spans), text around it converts.
         assert_eq!(
             text_emoticons_to_emoji("/-ok\n```\necho /-strong\n```\n/-heart"),
@@ -5752,7 +5780,10 @@ pub async fn recall_message(
         if st < 0 {
             crate::logger::log_error(
                 "chat::recall_message",
-                &format!("rejected msgId={} group={is_group} status={st} resp={dec}", msg.id),
+                &format!(
+                    "rejected msgId={} group={is_group} status={st} resp={dec}",
+                    msg.id
+                ),
             );
             anyhow::bail!("máy chủ từ chối thu hồi (status={st})");
         }
@@ -6877,12 +6908,22 @@ pub async fn poll_new_messages(
             }
         })
         .collect();
-    for chunk in known_ids.chunks(25) {
-        if let Ok(preview_resp) = get_last_msgs(s, chunk).await {
+    let preview_chunks: Vec<Vec<String>> = known_ids.chunks(25).map(|c| c.to_vec()).collect();
+    if !preview_chunks.is_empty() {
+        use futures_util::StreamExt;
+        let preview_resps: Vec<Value> = futures_util::stream::iter(
+            preview_chunks
+                .into_iter()
+                .map(|chunk| async move { get_last_msgs(s, &chunk).await.ok() }),
+        )
+        .buffer_unordered(4)
+        .filter_map(|r| async move { r })
+        .collect()
+        .await;
+        for preview_resp in preview_resps {
             merge_previews(threads, &preview_resp);
         }
     }
-    // 2b. Sync Cloud của tôi (`send2me_id`) and group conversations via `/api/cm/getrecentv2`
     let send2me_id = s
         .login
         .as_ref()
@@ -6902,23 +6943,43 @@ pub async fn poll_new_messages(
         .filter(|t| t.is_group && !t.id.is_empty())
         .map(|t| t.id.clone())
         .collect();
-    for gid in group_ids {
-        if let Ok(cm_resp) = get_cloud_messages(s, &gid, "0", false, 50).await {
+    if !group_ids.is_empty() {
+        use futures_util::StreamExt;
+        let group_resps: Vec<(String, Value)> =
+            futures_util::stream::iter(group_ids.into_iter().map(|gid| async move {
+                get_cloud_messages(s, &gid, "0", false, 50)
+                    .await
+                    .ok()
+                    .map(|resp| (gid, resp))
+            }))
+            .buffer_unordered(4)
+            .filter_map(|r| async move { r })
+            .collect()
+            .await;
+        for (gid, cm_resp) in group_resps {
             if let Some(t) = threads.iter_mut().find(|t| t.id == gid) {
                 merge_group_history(t, &cm_resp);
             }
         }
     }
-    // 3. Resolve display names for any newly discovered threads
     resolve_thread_names(s, threads).await;
     threads.retain(|t| !t.messages.is_empty() || !t.name.starts_with("Người dùng "));
     deduplicate_threads(threads, None);
-    let uin = s.login.as_ref().map(|l| l.uin.as_str()).unwrap_or_default();
-    let acc_db = crate::store::db_path_for_account(uin);
-    if let Ok(mut store) = crate::store::MessageStore::open(&acc_db) {
-        let _ = crate::store::persist_threads(&mut store, threads);
-    }
-    save_threads_cache_for(uin, threads);
+    let uin = s
+        .login
+        .as_ref()
+        .map(|l| l.uin.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let acc_db = crate::store::db_path_for_account(&uin);
+    let snapshot = threads.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Ok(mut store) = crate::store::MessageStore::open(&acc_db) {
+            let _ = crate::store::persist_threads(&mut store, &snapshot);
+        }
+        save_threads_cache_for(&uin, &snapshot);
+    })
+    .await;
     Ok(())
 }
 
@@ -7032,7 +7093,9 @@ fn extract_content_text(v: &Value) -> Option<String> {
                                 }
                             }
                         }
-                        Value::String(s) if s.trim().starts_with('{') || s.trim().starts_with('[') => {
+                        Value::String(s)
+                            if s.trim().starts_with('{') || s.trim().starts_with('[') =>
+                        {
                             if let Some(inner) = extract_content_text(nested) {
                                 if !inner.is_empty() {
                                     return Some(inner);
@@ -7162,8 +7225,8 @@ pub fn is_zalo_photo_cdn_url(url: &str) -> bool {
     }
     // Direct image file extensions anywhere (kể cả jxl/heic/avif Zalo dùng, #118)
     if [
-        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".ico", ".jfif", ".tif", ".tiff",
-        ".tga", ".qoi", ".jxl", ".heic", ".heif", ".avif", ".svg",
+        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".ico", ".jfif", ".tif", ".tiff", ".tga",
+        ".qoi", ".jxl", ".heic", ".heif", ".avif", ".svg",
     ]
     .iter()
     .any(|ext| path_part.ends_with(ext))
@@ -7297,7 +7360,10 @@ pub fn resolve_attachment_file_name(title: Option<&str>, text: &str, url: &str) 
 
 pub(crate) fn is_video_file_extension(ext: &str) -> bool {
     matches!(
-        ext.trim().trim_start_matches('.').to_ascii_lowercase().as_str(),
+        ext.trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase()
+            .as_str(),
         "mp4" | "mov" | "mkv" | "webm" | "avi"
     )
 }
@@ -7327,15 +7393,20 @@ fn extract_link_info(
             // href là chính, nhưng nhiều payload ảnh/video chỉ có normalUrl/hdUrl/oriUrl/url/videoUrl
             // hoặc mỗi thumb (#118) — fallback theo thứ tự để không mất URL.
             let href = [
-                "href", "normalUrl", "hdUrl", "oriUrl", "url", "videoUrl", "playUrl", "thumb",
+                "href",
+                "normalUrl",
+                "hdUrl",
+                "oriUrl",
+                "url",
+                "videoUrl",
+                "playUrl",
+                "thumb",
                 "hd",
             ]
             .iter()
             .filter_map(|k| o.get(*k).and_then(Value::as_str))
             .map(str::trim)
-            .find(|h| {
-                !h.is_empty() && (h.starts_with("http://") || h.starts_with("https://"))
-            })
+            .find(|h| !h.is_empty() && (h.starts_with("http://") || h.starts_with("https://")))
             .map(str::to_string);
             let Some(url) = href else {
                 return (None, None, None, None, None);
@@ -7448,9 +7519,6 @@ fn extract_link_info(
             }
             if is_video {
                 src = Some("Video Zalo".to_string());
-                if file_ext.is_none() {
-                    file_ext = Some("mp4".to_string());
-                }
                 if title.is_none()
                     || title
                         .as_deref()
@@ -7483,8 +7551,7 @@ fn parse_embedded_json(v: &Value) -> Option<Value> {
         Value::Object(_) | Value::Array(_) => Some(v.clone()),
         Value::String(s) => {
             let t = s.trim();
-            if (t.starts_with('{') && t.ends_with('}'))
-                || (t.starts_with('[') && t.ends_with(']'))
+            if (t.starts_with('{') && t.ends_with('}')) || (t.starts_with('[') && t.ends_with(']'))
             {
                 serde_json::from_str::<Value>(t).ok()
             } else {
@@ -7515,9 +7582,7 @@ fn pick_action_url(o: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<
     keys.iter()
         .filter_map(|k| o.get(*k).and_then(Value::as_str))
         .map(str::trim)
-        .find(|s| {
-            s.starts_with("http://") || s.starts_with("https://") || s.starts_with("zalo://")
-        })
+        .find(|s| s.starts_with("http://") || s.starts_with("https://") || s.starts_with("zalo://"))
         .map(str::to_string)
 }
 
@@ -7676,7 +7741,10 @@ fn build_oa_list_card(arr: &[Value]) -> Option<OaRichCard> {
 }
 
 /// Extract structured OA / MiniApp / ZInstant / ECard rich card metadata from a Zalo wire payload.
-pub(crate) fn extract_oa_rich_card(msg_type: &str, raw_content_val: Option<&Value>) -> Option<OaRichCard> {
+pub(crate) fn extract_oa_rich_card(
+    msg_type: &str,
+    raw_content_val: Option<&Value>,
+) -> Option<OaRichCard> {
     let raw = raw_content_val?;
     let parsed = parse_embedded_json(raw)?;
 
@@ -7716,10 +7784,7 @@ pub(crate) fn extract_oa_rich_card(msg_type: &str, raw_content_val: Option<&Valu
     let meta_val = zinstant_val.as_ref().or(params_val.as_ref());
 
     if msg_type == "chat.ecard" {
-        let ecard_type = obj
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let ecard_type = obj.get("type").and_then(Value::as_str).unwrap_or_default();
         if ecard_type == "7" || ecard_type == "client.onboarding" {
             return None;
         }
@@ -7771,7 +7836,8 @@ pub(crate) fn extract_oa_rich_card(msg_type: &str, raw_content_val: Option<&Valu
         }
     }
 
-    let has_http_href = pick_http_url(obj, &["href", "normalUrl", "hdUrl", "oriUrl", "url"]).is_some();
+    let has_http_href =
+        pick_http_url(obj, &["href", "normalUrl", "hdUrl", "oriUrl", "url"]).is_some();
     let banner_thumb = pick_http_url(
         obj,
         &["thumb", "thumbUrl", "image", "banner", "cover", "icon"],
@@ -7821,7 +7887,9 @@ pub(crate) fn extract_oa_rich_card(msg_type: &str, raw_content_val: Option<&Valu
     }
 
     let is_miniapp = action_str.contains("miniapp")
-        || url.as_deref().is_some_and(|u| u.starts_with("zalo://") || u.contains("mini.zalo.me"))
+        || url
+            .as_deref()
+            .is_some_and(|u| u.starts_with("zalo://") || u.contains("mini.zalo.me"))
         || meta_val
             .and_then(Value::as_object)
             .is_some_and(|m| m.contains_key("appId") || m.contains_key("miniAppId"));
@@ -7953,9 +8021,9 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         if link_thumb.is_none() {
             link_thumb = link_url.clone();
         }
-        let is_raw_token_title = link_title.as_deref().is_some_and(|t| {
-            t.len() > 20 && !t.contains(' ') && !t.contains('.')
-        });
+        let is_raw_token_title = link_title
+            .as_deref()
+            .is_some_and(|t| t.len() > 20 && !t.contains(' ') && !t.contains('.'));
         if link_title.is_none() || is_raw_token_title {
             link_title = Some("Video".to_string());
         }
@@ -8314,9 +8382,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     } else if is_file_msg {
         crate::message_model::MessageKind::File
     } else if msg_type == "chat.list.action"
-        || oa_card
-            .as_ref()
-            .is_some_and(|c| c.card_type == "oa_list")
+        || oa_card.as_ref().is_some_and(|c| c.card_type == "oa_list")
     {
         crate::message_model::MessageKind::Action
     } else if matches!(
@@ -10864,7 +10930,8 @@ pub fn extract_mobile_sync_controls(data_node: &Value) -> Vec<MobileSyncControlE
             crate::logger::log_sync(&format!(
                 "ctrl transfer_sync2: act={act} sync={sid_log} status={st_log:?} batchType={bt_log:?} err={err_log:?} isLast={last_log:?} has_url={has_url}"
             ));
-        } else if matches!(act_type, "transfer_msg" | "syncmsgmb") && act != "transfer_after_login" {
+        } else if matches!(act_type, "transfer_msg" | "syncmsgmb") && act != "transfer_after_login"
+        {
             let ua_log = parsed_data
                 .get("user_action")
                 .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
@@ -11180,11 +11247,7 @@ pub async fn leave_group(s: &Session, grid: &str, silent: bool) -> Result<Value>
         "language": "vi"
     });
     let params = s.encoded_params(&body)?;
-    let url = format!(
-        "{}/api/group/leave?{}",
-        s.domains.group,
-        s.common_params()
-    );
+    let url = format!("{}/api/group/leave?{}", s.domains.group, s.common_params());
     let resp = s.post_form(&url, format!("params={params}")).await?;
     let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
     if let Some(code) = resp.get("error_code").and_then(Value::as_i64) {
@@ -11279,9 +11342,13 @@ mod tests {
 
     #[test]
     fn media_group_layout_ignores_standalone_photos() {
-        let single = json!({ "params": "{\"width\":800,\"is_group_layout\":0,\"group_layout_id\":\"9\"}" });
+        let single =
+            json!({ "params": "{\"width\":800,\"is_group_layout\":0,\"group_layout_id\":\"9\"}" });
         assert_eq!(MediaGroupLayout::from_content(&single), None);
-        assert_eq!(MediaGroupLayout::from_content(&json!({ "href": "x" })), None);
+        assert_eq!(
+            MediaGroupLayout::from_content(&json!({ "href": "x" })),
+            None
+        );
         assert_eq!(MediaGroupLayout::from_content(&json!("plain text")), None);
     }
 
@@ -11296,7 +11363,10 @@ mod tests {
         assert_eq!(params["totalItemInGroup"], json!(3));
         let ext: Value = serde_json::from_str(params["extMsgProp"].as_str().expect("string"))
             .expect("extMsgProp is JSON");
-        assert_eq!(ext, json!({ "groupMediaMsg": { "groupLayoutId": "1731100000000" } }));
+        assert_eq!(
+            ext,
+            json!({ "groupMediaMsg": { "groupLayoutId": "1731100000000" } })
+        );
         assert_eq!(params["photoId"], json!(42));
     }
 
@@ -13720,7 +13790,9 @@ mod send_identity_tests {
         });
         let cm = parse_chat_message(&ecard_msg).expect("should parse ecard");
         assert_eq!(cm.kind, crate::message_model::MessageKind::WebContent);
-        let card = cm.effective_oa_card().expect("ecard should produce oa_card");
+        let card = cm
+            .effective_oa_card()
+            .expect("ecard should produce oa_card");
         assert_eq!(card.card_type, "ecard");
         assert_eq!(card.buttons.len(), 1);
         assert_eq!(card.buttons[0].label, "Gửi lời chúc");
@@ -13737,9 +13809,15 @@ mod send_identity_tests {
             }
         });
         let malformed = parse_chat_message(&malformed_msg).expect("should not panic on bad json");
-        assert_eq!(malformed.kind, crate::message_model::MessageKind::WebContent);
         assert_eq!(
-            malformed.effective_oa_card().and_then(|c| c.title).as_deref(),
+            malformed.kind,
+            crate::message_model::MessageKind::WebContent
+        );
+        assert_eq!(
+            malformed
+                .effective_oa_card()
+                .and_then(|c| c.title)
+                .as_deref(),
             Some("Bản tin thời tiết")
         );
     }

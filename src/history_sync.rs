@@ -206,7 +206,6 @@ pub fn last_mobile_sync_status() -> Option<String> {
     LAST_MOBILE_SYNC_STATUS.lock().ok().and_then(|g| g.clone())
 }
 
-
 static CURRENT_SYNC_KEYS: std::sync::Mutex<Option<(rsa::RsaPrivateKey, String)>> =
     std::sync::Mutex::new(None);
 
@@ -217,7 +216,10 @@ pub fn get_sync_keys() -> Option<(rsa::RsaPrivateKey, String)> {
 
 /// Retrieve the active RSA 2048 public key.
 pub fn get_sync_public_key() -> Option<String> {
-    CURRENT_SYNC_KEYS.lock().ok().and_then(|g| g.as_ref().map(|(_, pub_k)| pub_k.clone()))
+    CURRENT_SYNC_KEYS
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|(_, pub_k)| pub_k.clone()))
 }
 /// Clear the active sync keys once sync is finalized.
 pub fn clear_sync_keys() {
@@ -231,9 +233,9 @@ pub fn clear_sync_keys() {
 /// `pc_name`+`public_key` khi gửi `user_confirm` về — key mới mỗi lần khiến
 /// phone thấy thiết bị lạ, bấm vào thông báo không mở được.
 pub fn generate_sync_public_key_for(uin: &str) -> String {
+    use base64::Engine;
     use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
     use rsa::{RsaPrivateKey, RsaPublicKey};
-    use base64::Engine;
 
     let path = crate::account_manager::sync_rsa_path_for(uin);
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -376,22 +378,27 @@ where
             "📲 Đang gửi yêu cầu đồng bộ tới Zalo trên điện thoại (hãy mở Zalo trên điện thoại và bấm 'Đồng bộ ngay')…".to_string(),
         );
         let partitions = chat::resolve_thread_partitions(s, threads).await;
-        crate::logger::log_sync(&format!("Tìm được {} partitions cho sync", partitions.len()));
+        crate::logger::log_sync(&format!(
+            "Tìm được {} partitions cho sync",
+            partitions.len()
+        ));
 
         let mut v2_sync_id = match chat::wake_phone_sync_v2(s).await {
-            Ok(sync_id) => match chat::send_sync_v2_request_with_queries(s, &sync_id, &partitions) {
-                Ok(true) => Some(sync_id),
-                Ok(false) => {
-                    set_active_v2_sync_id(None);
-                    crate::logger::log_sync("V2 cmd 590 thất bại (WebSocket chưa kết nối)");
-                    None
+            Ok(sync_id) => {
+                match chat::send_sync_v2_request_with_queries(s, &sync_id, &partitions) {
+                    Ok(true) => Some(sync_id),
+                    Ok(false) => {
+                        set_active_v2_sync_id(None);
+                        crate::logger::log_sync("V2 cmd 590 thất bại (WebSocket chưa kết nối)");
+                        None
+                    }
+                    Err(e) => {
+                        set_active_v2_sync_id(None);
+                        crate::logger::log_sync(&format!("V2 tạo gói cmd 590 FAIL: {e}"));
+                        None
+                    }
                 }
-                Err(e) => {
-                    set_active_v2_sync_id(None);
-                    crate::logger::log_sync(&format!("V2 tạo gói cmd 590 FAIL: {e}"));
-                    None
-                }
-            },
+            }
             Err(e) => {
                 set_active_v2_sync_id(None);
                 crate::logger::log_sync(&format!("V2 mở session FAIL: {e}"));
@@ -502,7 +509,8 @@ where
                 return Ok(PhoneSyncReport::default());
             }
             if let Some(st) = last_mobile_sync_status().as_deref() {
-                let is_error = st.contains("Lỗi") || st.contains("Không thể") || st.contains("thất bại");
+                let is_error =
+                    st.contains("Lỗi") || st.contains("Không thể") || st.contains("thất bại");
                 if is_error {
                     had_error = true;
                     set_last_phone_sync_error(Some(st.to_string()));
@@ -544,16 +552,18 @@ where
 
         if confirmed {
             // Đã xác nhận → chỉ chờ batch / BackupReady, không gửi lại request.
-            on_progress(0.50, "📲 Đã xác nhận — chờ điện thoại nén & gửi gói tin…".to_string());
+            on_progress(
+                0.50,
+                "📲 Đã xác nhận — chờ điện thoại nén & gửi gói tin…".to_string(),
+            );
             let finish_deadline = std::time::Instant::now() + Duration::from_secs(180);
             let mut ok = false;
             while std::time::Instant::now() < finish_deadline {
                 if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
                     break;
                 }
-                let v2_done = v2_sync_id.is_some()
-                    && is_sync_v2_last_seen()
-                    && sync_v2_inflight_count() == 0;
+                let v2_done =
+                    v2_sync_id.is_some() && is_sync_v2_last_seen() && sync_v2_inflight_count() == 0;
                 if v2_done {
                     let done_msg = last_mobile_sync_status()
                         .filter(|s| s.contains("thành công"))
@@ -580,7 +590,10 @@ where
                             let _ = sync_v2_batch_lock().lock().await;
                         }
                         break;
-                    } else if st.contains("Lỗi") || st.contains("Không thể") || st.contains("thất bại") {
+                    } else if st.contains("Lỗi")
+                        || st.contains("Không thể")
+                        || st.contains("thất bại")
+                    {
                         set_last_phone_sync_error(Some(st.to_string()));
                         on_progress(1.0, st.to_string());
                         break;
@@ -715,39 +728,47 @@ where
             }
         })
         .collect();
-    let chunks: Vec<&[String]> = known_ids.chunks(25).collect();
+    let chunks: Vec<Vec<String>> = known_ids.chunks(25).map(|c| c.to_vec()).collect();
     let total_chunks = chunks.len().max(1);
-    for (idx, chunk) in chunks.into_iter().enumerate() {
+    for (wave_idx, wave) in chunks.chunks(4).enumerate() {
         if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
             let _ = chat::cancel_phone_sync(s, &pub_key).await;
             break;
         }
-        match chat::get_last_msgs(s, chunk).await {
-            Ok(response) => chat::merge_previews(threads, &response),
-            Err(error) => warnings.push(format!(
-                "Tải tin nhắn xem trước lô {}: {}",
-                idx + 1,
-                sync_error_summary(&error)
-            )),
+        use futures_util::StreamExt;
+        let base_idx = wave_idx * 4;
+        let wave_results: Vec<(usize, Result<serde_json::Value>)> =
+            futures_util::stream::iter(wave.iter().cloned().enumerate().map(|(off, chunk)| {
+                let idx = base_idx + off;
+                async move { (idx, chat::get_last_msgs(s, &chunk).await) }
+            }))
+            .buffer_unordered(4)
+            .collect()
+            .await;
+        for (idx, res) in wave_results {
+            match res {
+                Ok(response) => chat::merge_previews(threads, &response),
+                Err(error) => warnings.push(format!(
+                    "Tải tin nhắn xem trước lô {}: {}",
+                    idx + 1,
+                    sync_error_summary(&error)
+                )),
+            }
         }
-        let frac = 0.45 + 0.25 * ((idx + 1) as f32 / total_chunks as f32);
+        let done = (base_idx + wave.len()).min(total_chunks);
+        let frac = 0.45 + 0.25 * (done as f32 / total_chunks as f32);
         on_progress(
             frac,
-            format!(
-                "🔄 Đang đồng bộ hội thoại 1-1 & nhóm ({}/{total_chunks} nhóm lô)…",
-                idx + 1
-            ),
+            format!("🔄 Đang đồng bộ hội thoại 1-1 & nhóm ({done}/{total_chunks} nhóm lô)…"),
         );
-        tokio::time::sleep(Duration::from_millis(120)).await;
     }
 
-    // Phase 4: Sync Cloud & group conversations via `/api/cm/getrecentv2` + `/api/cm/getoldv2`
     let send2me_id = s
         .login
         .as_ref()
         .map(|l| l.send2me_id.clone())
         .unwrap_or_default();
-    let cm_targets: Vec<usize> = threads
+    let cm_targets: Vec<(usize, String, String)> = threads
         .iter()
         .enumerate()
         .filter(|(_, t)| {
@@ -756,54 +777,87 @@ where
                     || t.name.contains("Cloud của tôi")
                     || (!send2me_id.is_empty() && t.id == send2me_id))
         })
-        .map(|(i, _)| i)
+        .map(|(i, t)| (i, t.id.clone(), t.name.clone()))
         .collect();
     let total_cm = cm_targets.len().max(1);
-    for (pos, tidx) in cm_targets.into_iter().enumerate() {
+    for (wave_idx, wave) in cm_targets.chunks(4).enumerate() {
         if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
             let _ = chat::cancel_phone_sync(s, &pub_key).await;
             break;
         }
-        let (tid, tname) = {
-            let t = &threads[tidx];
-            (t.id.clone(), t.name.clone())
-        };
-        let frac = 0.70 + 0.25 * ((pos + 1) as f32 / total_cm as f32);
-        on_progress(
-            frac,
-            format!("☁️ Đang đồng bộ lịch sử: {tname} ({}/{total_cm})…", pos + 1),
-        );
-        match chat::get_cloud_messages(s, &tid, "0", false, PAGE).await {
-            Ok(response) => {
-                chat::merge_group_history(&mut threads[tidx], &response);
-                let (has_more, is_old, last_msg_id) = chat::parse_cloud_page_meta(&response);
-                if has_more {
-                    if let Some(oldest) = last_msg_id.or_else(|| next_cursor(&threads[tidx], "")) {
-                        match chat::get_cloud_messages(s, &tid, &oldest, is_old, PAGE).await {
-                            Ok(old_response) => {
-                                chat::merge_group_history(&mut threads[tidx], &old_response);
-                            }
-                            Err(error) if chat::is_cloud_stop_retry(&error) => {}
-                            Err(error) => warnings.push(format!(
-                                "Tải trang lịch sử Cloud/Nhóm: {}",
-                                sync_error_summary(&error)
-                            )),
+        use futures_util::StreamExt;
+        let base_pos = wave_idx * 4;
+        let first_pages: Vec<(usize, String, Result<serde_json::Value>)> =
+            futures_util::stream::iter(wave.iter().cloned().map(|(tidx, tid, _)| async move {
+                (
+                    tidx,
+                    tid.clone(),
+                    chat::get_cloud_messages(s, &tid, "0", false, PAGE).await,
+                )
+            }))
+            .buffer_unordered(4)
+            .collect()
+            .await;
+
+        let mut second_page_reqs: Vec<(usize, String, String, bool)> = Vec::new();
+        for (tidx, tid, res) in first_pages {
+            match res {
+                Ok(response) => {
+                    chat::merge_group_history(&mut threads[tidx], &response);
+                    let (has_more, is_old, last_msg_id) = chat::parse_cloud_page_meta(&response);
+                    if has_more {
+                        if let Some(oldest) =
+                            last_msg_id.or_else(|| next_cursor(&threads[tidx], ""))
+                        {
+                            second_page_reqs.push((tidx, tid, oldest, is_old));
+                        } else {
+                            warnings.push(
+                                "Cloud/Nhóm: máy chủ báo còn lịch sử nhưng không có mốc phân trang"
+                                    .into(),
+                            );
                         }
-                    } else {
-                        warnings.push(
-                            "Cloud/Nhóm: máy chủ báo còn lịch sử nhưng không có mốc phân trang"
-                                .into(),
-                        );
                     }
                 }
+                Err(error) if chat::is_cloud_stop_retry(&error) => {}
+                Err(error) => warnings.push(format!(
+                    "Tải lịch sử Cloud/Nhóm: {}",
+                    sync_error_summary(&error)
+                )),
             }
-            Err(error) if chat::is_cloud_stop_retry(&error) => {}
-            Err(error) => warnings.push(format!(
-                "Tải lịch sử Cloud/Nhóm: {}",
-                sync_error_summary(&error)
-            )),
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        if !second_page_reqs.is_empty() && !PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
+            let older_pages: Vec<(usize, Result<serde_json::Value>)> =
+                futures_util::stream::iter(second_page_reqs.into_iter().map(
+                    |(tidx, tid, oldest, is_old)| async move {
+                        (
+                            tidx,
+                            chat::get_cloud_messages(s, &tid, &oldest, is_old, PAGE).await,
+                        )
+                    },
+                ))
+                .buffer_unordered(4)
+                .collect()
+                .await;
+            for (tidx, old_res) in older_pages {
+                match old_res {
+                    Ok(old_response) => {
+                        chat::merge_group_history(&mut threads[tidx], &old_response);
+                    }
+                    Err(error) if chat::is_cloud_stop_retry(&error) => {}
+                    Err(error) => warnings.push(format!(
+                        "Tải trang lịch sử Cloud/Nhóm: {}",
+                        sync_error_summary(&error)
+                    )),
+                }
+            }
+        }
+        let done = (base_pos + wave.len()).min(total_cm);
+        let last_name = wave.last().map(|(_, _, n)| n.as_str()).unwrap_or("");
+        let frac = 0.70 + 0.25 * (done as f32 / total_cm as f32);
+        on_progress(
+            frac,
+            format!("☁️ Đang đồng bộ lịch sử: {last_name} ({done}/{total_cm})…"),
+        );
     }
 
     // Phase 5: Resolve contact/group display names, deduplicate, and persist to per-account SQLite & cache
@@ -819,16 +873,17 @@ where
     let mut snapshot = threads.clone();
     let db_path_clone = db_path.clone();
     let uin_for_cache = uin_str.clone();
-    let (db_added, hydrated_threads) = tokio::task::spawn_blocking(move || -> Result<(usize, Vec<Thread>)> {
-        let mut st = MessageStore::open(&db_path_clone)?;
-        let n = store::persist_threads(&mut st, &snapshot)?;
-        // Hydrate ngược từ SQLite để nạp toàn bộ tin nhắn 1-1 & nhóm vừa giải mã
-        // từ Sync V2/V1 trước khi ghi `accounts/<uin>_threads.json`.
-        let _ = st.hydrate_threads(&mut snapshot, 100);
-        chat::save_threads_cache_for(&uin_for_cache, &snapshot);
-        Ok((n, snapshot))
-    })
-    .await??;
+    let (db_added, hydrated_threads) =
+        tokio::task::spawn_blocking(move || -> Result<(usize, Vec<Thread>)> {
+            let mut st = MessageStore::open(&db_path_clone)?;
+            let n = store::persist_threads(&mut st, &snapshot)?;
+            // Hydrate ngược từ SQLite để nạp toàn bộ tin nhắn 1-1 & nhóm vừa giải mã
+            // từ Sync V2/V1 trước khi ghi `accounts/<uin>_threads.json`.
+            let _ = st.hydrate_threads(&mut snapshot, 100);
+            chat::save_threads_cache_for(&uin_for_cache, &snapshot);
+            Ok((n, snapshot))
+        })
+        .await??;
     *threads = hydrated_threads;
     chat::resolve_thread_names(s, threads).await;
     chat::deduplicate_threads(threads, None);
@@ -865,6 +920,16 @@ pub async fn import_mobile_backup_container(
     url: &str,
     encrypted_key: &str,
 ) -> Result<usize> {
+    let (imported, _) = import_mobile_backup_container_batch(s, url, encrypted_key).await?;
+    Ok(imported)
+}
+
+pub(crate) async fn import_mobile_backup_container_batch(
+    s: &Session,
+    url: &str,
+    encrypted_key: &str,
+) -> Result<(usize, Vec<Thread>)> {
+    use crate::store::{StoredMessage, StoredThread};
     use aes::cipher::{BlockDecryptMut, KeyIvInit};
     use base64::Engine;
     use rsa::Pkcs1v15Encrypt;
@@ -872,7 +937,6 @@ pub async fn import_mobile_backup_container(
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
     use std::io::Cursor;
-    use crate::store::StoredMessage;
 
     if url.is_empty() {
         anyhow::bail!("empty backup url");
@@ -895,6 +959,7 @@ pub async fn import_mobile_backup_container(
     let resp = s
         .http
         .get(url)
+        .timeout(Duration::from_secs(90))
         .header("Cookie", cookie_hdr)
         .header("User-Agent", "ZaloPC-win32-26.10.11")
         .send()
@@ -909,147 +974,159 @@ pub async fn import_mobile_backup_container(
         anyhow::bail!("backup file too small: {} bytes", crypt_data.len());
     }
 
-    let hex_key: String = raw_key.iter().map(|b| format!("{:02X}", b)).collect();
-    let key_32 = &hex_key.as_bytes()[..32];
-    type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
-
-    let chunk_size = 65536;
-    let iv_zero = [0u8; 16];
-    let mut decrypted = Vec::with_capacity(crypt_data.len());
-
-    for chunk in crypt_data.chunks(chunk_size) {
-        let rem = chunk.len() % 16;
-        let aligned_len = chunk.len() - rem;
-        let mut buf = chunk[..aligned_len].to_vec();
-
-        let dec = Aes256CbcDec::new(key_32.into(), &iv_zero.into());
-        dec.decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut buf)
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-
-        decrypted.extend_from_slice(&buf);
-        if rem > 0 {
-            decrypted.extend_from_slice(&chunk[aligned_len..]);
-        }
-    }
-
-    let magic = decrypted.get(..7).unwrap_or_default();
-    if magic != b"ZDB4.0\0" {
-        anyhow::bail!("invalid backup container magic: {:?}", magic);
-    }
-
-    let mut offset = 14;
-    if offset + 4 > decrypted.len() {
-        anyhow::bail!("truncated container header");
-    }
-    let n_files = u32::from_be_bytes(decrypted[offset..offset + 4].try_into()?) as usize;
-    offset += 4;
-
-    let mut toc = Vec::new();
-    let mut fids = Vec::new();
-    let mut gids = Vec::new();
-
-    for _ in 0..n_files {
-        if offset + 4 > decrypted.len() {
-            break;
-        }
-        let name_len = u32::from_be_bytes(decrypted[offset..offset + 4].try_into()?) as usize;
-        offset += 4;
-        if offset + name_len > decrypted.len() {
-            break;
-        }
-        let raw_name = String::from_utf8_lossy(&decrypted[offset..offset + name_len]).to_string();
-        offset += name_len;
-        if offset + 4 > decrypted.len() {
-            break;
-        }
-        let size = u32::from_be_bytes(decrypted[offset..offset + 4].try_into()?) as usize;
-        offset += 4;
-
-        let safe_name = std::path::Path::new(&raw_name)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        if safe_name.is_empty() {
-            toc.push((String::new(), size));
-            continue;
-        }
-        let stem = safe_name.trim_end_matches(".db");
-        if stem.starts_with("group_") {
-            if let Ok(gid) = stem[6..].parse::<i64>() {
-                gids.push(gid);
+    let (temp_dir, extracted_files, fids, all_fids, gids) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let hex_key: String = raw_key.iter().map(|b| format!("{:02X}", b)).collect();
+            if hex_key.len() < 32 {
+                anyhow::bail!("derived backup key too short");
             }
-        } else if let Ok(fid) = stem.parse::<i64>() {
-            fids.push(fid);
-        }
+            let key_32 = &hex_key.as_bytes()[..32];
+            type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
-        toc.push((safe_name, size));
-    }
-    let toc_end = offset;
+            let chunk_size = 65536;
+            let iv_zero = [0u8; 16];
+            let mut decrypted = Vec::with_capacity(crypt_data.len());
 
-    if toc_end >= decrypted.len() {
-        anyhow::bail!("corrupted container: toc extends beyond payload");
-    }
-    let xz_slice = &decrypted[toc_end..];
-    let end_pos = xz_slice
-        .windows(2)
-        .rposition(|w| w == b"YZ")
-        .ok_or_else(|| anyhow::anyhow!("XZ footer not found"))?
-        + 2;
+            for chunk in crypt_data.chunks(chunk_size) {
+                let rem = chunk.len() % 16;
+                let aligned_len = chunk.len() - rem;
+                let mut buf = chunk[..aligned_len].to_vec();
 
-    let mut cursor = Cursor::new(&xz_slice[..end_pos]);
-    let mut payload = Vec::new();
-    lzma_rs::xz_decompress(&mut cursor, &mut payload)?;
+                let dec = Aes256CbcDec::new(key_32.into(), &iv_zero.into());
+                dec.decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut buf)
+                    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-    let temp_dir = std::env::temp_dir().join(format!(
-        "ctdozlite_sync_{}",
-        crate::param_cipher::random_hex(8)
-    ));
-    let _ = std::fs::create_dir_all(&temp_dir);
+                decrypted.extend_from_slice(&buf);
+                if rem > 0 {
+                    decrypted.extend_from_slice(&chunk[aligned_len..]);
+                }
+            }
 
-    let mut curr_offset = 0;
-    let mut extracted_files: Vec<(String, std::path::PathBuf, Option<i64>, bool)> = Vec::new();
-    let mut seen_fids: HashSet<i64> = fids.iter().copied().collect();
-    let mut all_fids: Vec<i64> = fids.clone();
+            let magic = decrypted.get(..7).unwrap_or_default();
+            if magic != b"ZDB4.0\0" {
+                anyhow::bail!("invalid backup container magic: {:?}", magic);
+            }
 
-    for (name, size) in &toc {
-        if curr_offset + size > payload.len() {
-            break;
-        }
-        let db_bytes = &payload[curr_offset..curr_offset + size];
-        curr_offset += size;
-        if name.is_empty() {
-            continue;
-        }
-        let stem = name.trim_end_matches(".db");
-        let is_group_db = stem.starts_with("group_");
-        let file_fid = if is_group_db {
-            None
-        } else {
-            stem.parse::<i64>().ok()
-        };
-        let temp_db_path = temp_dir.join(name);
-        if std::fs::write(&temp_db_path, db_bytes).is_err() {
-            continue;
-        }
-        if let Ok(conn) = Connection::open(&temp_db_path) {
-            if let Ok(mut stmt) =
-                conn.prepare("SELECT DISTINCT SenderId FROM ChatContent WHERE SenderId > 0")
-            {
-                if let Ok(rows) = stmt.query_map([], |row| row.get::<_, i64>(0)) {
-                    for sid in rows.flatten() {
-                        if sid > 0 && seen_fids.insert(sid) {
-                            all_fids.push(sid);
+            let mut offset = 14;
+            if offset + 4 > decrypted.len() {
+                anyhow::bail!("truncated container header");
+            }
+            let n_files = u32::from_be_bytes(decrypted[offset..offset + 4].try_into()?) as usize;
+            offset += 4;
+
+            let mut toc = Vec::new();
+            let mut fids = Vec::new();
+            let mut gids = Vec::new();
+
+            for _ in 0..n_files {
+                if offset + 4 > decrypted.len() {
+                    break;
+                }
+                let name_len =
+                    u32::from_be_bytes(decrypted[offset..offset + 4].try_into()?) as usize;
+                offset += 4;
+                if offset + name_len > decrypted.len() {
+                    break;
+                }
+                let raw_name =
+                    String::from_utf8_lossy(&decrypted[offset..offset + name_len]).to_string();
+                offset += name_len;
+                if offset + 4 > decrypted.len() {
+                    break;
+                }
+                let size = u32::from_be_bytes(decrypted[offset..offset + 4].try_into()?) as usize;
+                offset += 4;
+
+                let safe_name = std::path::Path::new(&raw_name)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if safe_name.is_empty() {
+                    toc.push((String::new(), size));
+                    continue;
+                }
+                let stem = safe_name.trim_end_matches(".db");
+                if let Some(rest) = stem.strip_prefix("group_") {
+                    if let Ok(gid) = rest.parse::<i64>() {
+                        gids.push(gid);
+                    }
+                } else if let Ok(fid) = stem.parse::<i64>() {
+                    fids.push(fid);
+                }
+
+                toc.push((safe_name, size));
+            }
+            let toc_end = offset;
+
+            if toc_end >= decrypted.len() {
+                anyhow::bail!("corrupted container: toc extends beyond payload");
+            }
+            let xz_slice = &decrypted[toc_end..];
+            let end_pos = xz_slice
+                .windows(2)
+                .rposition(|w| w == b"YZ")
+                .ok_or_else(|| anyhow::anyhow!("XZ footer not found"))?
+                + 2;
+
+            let mut cursor = Cursor::new(&xz_slice[..end_pos]);
+            let mut payload = Vec::new();
+            lzma_rs::xz_decompress(&mut cursor, &mut payload)?;
+
+            let temp_dir = std::env::temp_dir().join(format!(
+                "ctdozlite_sync_{}",
+                crate::param_cipher::random_hex(8)
+            ));
+            let _ = std::fs::create_dir_all(&temp_dir);
+
+            let mut curr_offset = 0;
+            let mut extracted_files: Vec<(String, std::path::PathBuf, Option<i64>, bool)> =
+                Vec::new();
+            let mut seen_fids: HashSet<i64> = fids.iter().copied().collect();
+            let mut all_fids: Vec<i64> = fids.clone();
+
+            for (name, size) in &toc {
+                if curr_offset + size > payload.len() {
+                    break;
+                }
+                let db_bytes = &payload[curr_offset..curr_offset + size];
+                curr_offset += size;
+                if name.is_empty() {
+                    continue;
+                }
+                let stem = name.trim_end_matches(".db");
+                let is_group_db = stem.starts_with("group_");
+                let file_fid = if is_group_db {
+                    None
+                } else {
+                    stem.parse::<i64>().ok()
+                };
+                let temp_db_path = temp_dir.join(name);
+                if std::fs::write(&temp_db_path, db_bytes).is_err() {
+                    continue;
+                }
+                if let Ok(conn) = Connection::open(&temp_db_path) {
+                    if let Ok(mut stmt) =
+                        conn.prepare("SELECT DISTINCT SenderId FROM ChatContent WHERE SenderId > 0")
+                    {
+                        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, i64>(0)) {
+                            for sid in rows.flatten() {
+                                if sid > 0 && seen_fids.insert(sid) {
+                                    all_fids.push(sid);
+                                }
+                            }
                         }
                     }
                 }
+                extracted_files.push((name.clone(), temp_db_path, file_fid, is_group_db));
             }
-        }
-        extracted_files.push((name.clone(), temp_db_path, file_fid, is_group_db));
-    }
+            Ok((temp_dir, extracted_files, fids, all_fids, gids))
+        })
+        .await??;
 
     let mut fid_to_uid: HashMap<i64, String> = HashMap::new();
     let mut id_map: HashMap<String, String> = HashMap::new();
+    let fids_set: HashSet<i64> = fids.into_iter().collect();
     let fid_chunks: Vec<&[i64]> = if all_fids.is_empty() {
         Vec::new()
     } else {
@@ -1070,7 +1147,16 @@ pub async fn import_mobile_backup_container(
         });
         let enc_params = s.encoded_params(&noise_body)?;
         let znoise_url = format!("https://zwid.api.zalo.me/api/znoise?{}", s.common_params());
-        let resp = s.post_form(&znoise_url, format!("params={enc_params}")).await?;
+        let resp = match s
+            .post_form(&znoise_url, format!("params={enc_params}"))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                return Err(e);
+            }
+        };
         let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
         if let Some(data) = dec.get("data") {
             if let Some(arr) = data.get("fids").and_then(|v| v.as_array()) {
@@ -1079,7 +1165,7 @@ pub async fn import_mobile_backup_container(
                         let tid_str = tid.trim().to_string();
                         if !tid_str.is_empty() {
                             fid_to_uid.insert(*fid, tid_str.clone());
-                            if fids.contains(fid) {
+                            if fids_set.contains(fid) {
                                 id_map.insert(format!("{fid}.db"), tid_str);
                             }
                         }
@@ -1099,140 +1185,188 @@ pub async fn import_mobile_backup_container(
         }
     }
 
-    let db_path = crate::store::db_path_for_account(&uin);
-    let mut store = crate::store::MessageStore::open(&db_path)?;
-
     let my_uid = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
-    let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
-    let mut cached_threads = crate::chat::load_threads_cache_for(&uin);
-    let mut total_imported = 0;
+    let my_name = s
+        .login
+        .as_ref()
+        .map(|l| l.display_name.clone())
+        .unwrap_or_else(|| "Tôi".into());
 
-    for (name, temp_db_path, file_fid, is_group_db) in extracted_files {
-        let Some(thread_id) = id_map.get(&name).cloned() else {
-            continue;
-        };
+    let (total_imported, touched_threads) =
+        tokio::task::spawn_blocking(move || -> Result<(usize, Vec<Thread>)> {
+            let db_path = crate::store::db_path_for_account(&uin);
+            let mut cached_threads = crate::chat::load_threads_cache_for(&uin);
+            let mut batch_threads: Vec<StoredThread> = Vec::new();
+            let mut batch_messages: Vec<StoredMessage> = Vec::new();
+            let mut touched_ids: HashSet<String> = HashSet::new();
 
-        if !thread_id.is_empty() && !cached_threads.iter().any(|t| t.id == thread_id) {
-            let short: String = thread_id.chars().take(8).collect();
-            cached_threads.push(Thread {
-                id: thread_id.clone(),
-                name: format!("Hội thoại {short}"),
-                is_group: is_group_db,
-                ..Default::default()
-            });
-        }
+            for (name, temp_db_path, file_fid, is_group_db) in extracted_files {
+                let Some(thread_id) = id_map.get(&name).cloned() else {
+                    continue;
+                };
+                if thread_id.is_empty() || thread_id == "0" {
+                    continue;
+                }
+                touched_ids.insert(thread_id.clone());
 
-        let Ok(conn) = Connection::open(&temp_db_path) else {
-            continue;
-        };
+                if !cached_threads.iter().any(|t| t.id == thread_id) {
+                    let short: String = thread_id.chars().take(8).collect();
+                    cached_threads.push(Thread {
+                        id: thread_id.clone(),
+                        name: format!("Hội thoại {short}"),
+                        is_group: is_group_db,
+                        ..Default::default()
+                    });
+                }
+                let thread_name = cached_threads
+                    .iter()
+                    .find(|t| t.id == thread_id)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
 
-        let Ok(mut stmt) = conn.prepare(
-            "SELECT SenderId, CliMsgId, GlbMsgId, MsgStatus, MsgType, TimeStamp, MsgContent, BinNet 
-             FROM ChatContent ORDER BY TimeStamp ASC",
-        ) else {
-            continue;
-        };
+                let Ok(conn) = Connection::open(&temp_db_path) else {
+                    continue;
+                };
+                let Ok(mut stmt) = conn.prepare(
+                    "SELECT SenderId, CliMsgId, GlbMsgId, MsgStatus, MsgType, TimeStamp, MsgContent, BinNet 
+                     FROM ChatContent ORDER BY TimeStamp ASC",
+                ) else {
+                    continue;
+                };
+                let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<Vec<u8>>>(7)?,
+                    ))
+                }) else {
+                    continue;
+                };
 
-        let Ok(rows) = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<Vec<u8>>>(7)?,
-            ))
-        }) else {
-            continue;
-        };
+                let mut max_ts = 0_i64;
+                for r in rows.flatten() {
+                    let (
+                        sender_id_num,
+                        cli_msg_id,
+                        glb_msg_id,
+                        _status,
+                        msg_type_num,
+                        ts,
+                        content_opt,
+                        bin_net_opt,
+                    ) = r;
+                    let mapped_sender = fid_to_uid.get(&sender_id_num);
+                    let is_outgoing =
+                        mapped_sender.is_some_and(|u| !my_uid.is_empty() && u == &my_uid)
+                            || (!is_group_db
+                                && file_fid.is_some_and(|f| sender_id_num > 0 && sender_id_num != f));
+                    let sender_id = if is_outgoing {
+                        my_uid.clone()
+                    } else if let Some(u) = mapped_sender {
+                        u.clone()
+                    } else if !is_group_db {
+                        thread_id.clone()
+                    } else {
+                        sender_id_num.to_string()
+                    };
+                    let sender_name = if is_outgoing {
+                        my_name.clone()
+                    } else {
+                        String::new()
+                    };
 
-        for r in rows.flatten() {
-            let (sender_id_num, cli_msg_id, glb_msg_id, _status, msg_type_num, ts, content_opt, bin_net_opt) = r;
-            let mapped_sender = fid_to_uid.get(&sender_id_num);
-            let is_outgoing = mapped_sender.is_some_and(|u| !my_uid.is_empty() && u == &my_uid)
-                || (!is_group_db && file_fid.is_some_and(|f| sender_id_num > 0 && sender_id_num != f));
-            let sender_id = if is_outgoing {
-                my_uid.clone()
-            } else if let Some(u) = mapped_sender {
-                u.clone()
-            } else if !is_group_db {
-                thread_id.clone()
-            } else {
-                sender_id_num.to_string()
-            };
-            let sender_name = if is_outgoing { my_name.clone() } else { String::new() };
+                    let msg_id = if glb_msg_id > 0 {
+                        glb_msg_id.to_string()
+                    } else {
+                        cli_msg_id.to_string()
+                    };
 
-            let msg_id = if glb_msg_id > 0 {
-                glb_msg_id.to_string()
-            } else {
-                cli_msg_id.to_string()
-            };
+                    let mut text = content_opt.unwrap_or_default().trim().to_string();
+                    let mut msg_type = "webchat".to_string();
 
-            let mut text = content_opt.unwrap_or_default().trim().to_string();
-            let mut msg_type = "webchat".to_string();
-
-            if text.is_empty() {
-                if let Some(bn) = &bin_net_opt {
-                    let s_latin = String::from_utf8_lossy(bn);
-                    if let Some(pos) = s_latin.find("maps.app.goo.gl") {
-                        msg_type = "chat.link".to_string();
-                        let sub = &s_latin[pos..];
-                        let end_url = sub.find(['"', '}', '\\', ' ']).unwrap_or(sub.len());
-                        let url = format!("https://{}", &sub[..end_url]);
-                        text = format!("Tôi đang trên đường tới. Bạn có thể xem tiến độ đi đường và thời gian đến của tôi trên Maps: {url}");
-                    } else if msg_type_num == 10 {
-                        msg_type = "chat.sticker".to_string();
-                        text = "[Nhãn dán]".to_string();
-                    } else if msg_type_num == 3 {
-                        msg_type = "chat.photo".to_string();
-                        text = "[Hình ảnh]".to_string();
-                    } else if msg_type_num == 12 {
-                        msg_type = "chat.link".to_string();
-                        text = "[Liên kết]".to_string();
+                    if text.is_empty() {
+                        if let Some(bn) = &bin_net_opt {
+                            let s_latin = String::from_utf8_lossy(bn);
+                            if let Some(pos) = s_latin.find("maps.app.goo.gl") {
+                                msg_type = "chat.link".to_string();
+                                let sub = &s_latin[pos..];
+                                let end_url = sub.find(['"', '}', '\\', ' ']).unwrap_or(sub.len());
+                                let url = format!("https://{}", &sub[..end_url]);
+                                text = format!("Tôi đang trên đường tới. Bạn có thể xem tiến độ đi đường và thời gian đến của tôi trên Maps: {url}");
+                            } else if msg_type_num == 10 {
+                                msg_type = "chat.sticker".to_string();
+                                text = "[Nhãn dán]".to_string();
+                            } else if msg_type_num == 3 {
+                                msg_type = "chat.photo".to_string();
+                                text = "[Hình ảnh]".to_string();
+                            } else if msg_type_num == 12 {
+                                msg_type = "chat.link".to_string();
+                                text = "[Liên kết]".to_string();
+                            }
+                        }
                     }
+
+                    if text.is_empty() {
+                        if msg_type_num == 10 {
+                            text = "[Nhãn dán]".to_string();
+                        } else if msg_type_num == 3 {
+                            text = "[Hình ảnh]".to_string();
+                        } else if msg_type_num == 12 {
+                            text = "[Liên kết]".to_string();
+                        }
+                    }
+                    if ts > max_ts {
+                        max_ts = ts;
+                    }
+
+                    batch_messages.push(StoredMessage {
+                        msg_id,
+                        thread_id: thread_id.clone(),
+                        sender_id,
+                        sender_name,
+                        text,
+                        msg_type,
+                        ts,
+                        is_outgoing,
+                        raw_json: String::new(),
+                    });
                 }
+
+                batch_threads.push(StoredThread {
+                    thread_id,
+                    name: thread_name,
+                    is_group: is_group_db,
+                    last_ts: max_ts,
+                    vanish_duration_sec: 0,
+                    vanish_started_at_sec: 0,
+                    last_read_msg_id: String::new(),
+                });
             }
 
-            if text.is_empty() {
-                if msg_type_num == 10 {
-                    text = "[Nhãn dán]".to_string();
-                } else if msg_type_num == 3 {
-                    text = "[Hình ảnh]".to_string();
-                } else if msg_type_num == 12 {
-                    text = "[Liên kết]".to_string();
-                }
-            }
+            let _ = std::fs::remove_dir_all(&temp_dir);
 
-            let sm = StoredMessage {
-                msg_id,
-                thread_id: thread_id.clone(),
-                sender_id,
-                sender_name,
-                text,
-                msg_type,
-                ts,
-                is_outgoing,
-                raw_json: String::new(),
-            };
+            let mut store = crate::store::MessageStore::open(&db_path)?;
+            let total_imported =
+                crate::store::persist_synced_batch(&mut store, &batch_threads, &batch_messages)?;
+            let _ = store.hydrate_threads_subset(&mut cached_threads, &touched_ids, 100);
+            crate::chat::save_threads_cache_for(&uin, &cached_threads);
+            let touched_threads: Vec<Thread> = cached_threads
+                .into_iter()
+                .filter(|t| touched_ids.contains(&t.id))
+                .collect();
+            Ok((total_imported, touched_threads))
+        })
+        .await??;
 
-            if store.upsert_message(&sm).unwrap_or(false) {
-                total_imported += 1;
-            }
-        }
-    }
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
-
-    let _ = store.hydrate_threads(&mut cached_threads, 50);
-    crate::chat::save_threads_cache_for(&uin, &cached_threads);
-
-    // Notify Zalo server and phone that snapshot is downloaded, dismissing mobile spinner
     let _ = crate::chat::clean_sync(s, &pub_key_b64).await;
     clear_sync_keys();
 
-    Ok(total_imported)
+    Ok((total_imported, touched_threads))
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -1272,7 +1406,12 @@ pub fn generate_sync_v2_keys_for(uin: &str) -> Result<SyncV2Keys> {
         ek_priv: hex_encode(&ek_priv),
     };
     if let Ok(mut g) = CURRENT_V2_KEYS.lock() {
-        *g = Some(SyncV2KeysRaw { ik_pub, ik_priv, ek_pub: ek_pub.clone(), ek_priv });
+        *g = Some(SyncV2KeysRaw {
+            ik_pub,
+            ik_priv,
+            ek_pub: ek_pub.clone(),
+            ek_priv,
+        });
     }
     Ok(keys)
 }
@@ -1342,6 +1481,7 @@ pub async fn import_sync_v2_meta(s: &Session, url: &str) -> Result<SyncV2Meta> {
     let resp = s
         .http
         .get(url)
+        .timeout(Duration::from_secs(45))
         .header("Cookie", cookie_hdr)
         .header("User-Agent", "ZaloPC-win32-26.10.11")
         .send()
@@ -1352,25 +1492,31 @@ pub async fn import_sync_v2_meta(s: &Session, url: &str) -> Result<SyncV2Meta> {
     }
 
     let bytes = resp.bytes().await?;
-    // wasmtime host (không cần Node.js). Keys phải tồn tại trong bộ nhớ tiến
-    // trình (generate_sync_v2_keys đã chạy trước khi request sync).
     let keys = current_v2_keys_raw()?;
-    let host = crate::zproto_host::ZprotoHost::load()?;
-    let mut session_record: Option<Vec<u8>> = None;
-    let mut last: Option<crate::zproto_host::DecryptedMeta> = None;
-    for chunk in crate::zproto_host::split_frames(&bytes)? {
-        let m = host.decrypt_metadata(&chunk, &keys.ik_pub, &keys.ik_priv, &keys.ek_priv, session_record.as_deref())?;
-        session_record = Some(m.session_record.clone());
-        last = Some(m);
-    }
-    let m = last.ok_or_else(|| anyhow::anyhow!("metadata rỗng"))?;
-    store_v2_session(&m.session_record);
-    Ok(SyncV2Meta {
-        session_id: m.session_id,
-        sender_identity: m.sender_identity,
+    tokio::task::spawn_blocking(move || -> Result<SyncV2Meta> {
+        let host = crate::zproto_host::ZprotoHost::load()?;
+        let mut session_record: Option<Vec<u8>> = None;
+        let mut last: Option<crate::zproto_host::DecryptedMeta> = None;
+        for chunk in crate::zproto_host::split_frames(&bytes)? {
+            let m = host.decrypt_metadata(
+                &chunk,
+                &keys.ik_pub,
+                &keys.ik_priv,
+                &keys.ek_priv,
+                session_record.as_deref(),
+            )?;
+            session_record = Some(m.session_record.clone());
+            last = Some(m);
+        }
+        let m = last.ok_or_else(|| anyhow::anyhow!("metadata rỗng"))?;
+        store_v2_session(&m.session_record);
+        Ok(SyncV2Meta {
+            session_id: m.session_id,
+            sender_identity: m.sender_identity,
+        })
     })
+    .await?
 }
-
 
 pub fn current_v2_keys() -> Result<SyncV2Keys> {
     use base64::Engine;
@@ -1415,8 +1561,7 @@ static SYNC_V2_SESSIONS: std::sync::Mutex<Vec<(String, String)>> =
 
 static ACTIVE_V2_SYNC_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 static SYNC_V2_IMPORTED_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SYNC_V2_LAST_SEEN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static SYNC_V2_LAST_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SYNC_V2_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 pub struct SyncV2InflightGuard;
@@ -1429,6 +1574,7 @@ impl SyncV2InflightGuard {
 }
 
 impl Drop for SyncV2InflightGuard {
+    #[allow(deprecated)]
     fn drop(&mut self) {
         let _ = SYNC_V2_INFLIGHT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             Some(v.saturating_sub(1))
@@ -1475,11 +1621,13 @@ pub fn active_v2_sync_id() -> Option<String> {
 static SYNC_V2_BATCH_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-static PROCESSED_SYNC_V2_URLS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+static PROCESSED_SYNC_V2_URLS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
-static PROCESSED_BACKUP_URLS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+static PROCESSED_BACKUP_URLS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 static NOISED_TO_THREAD_ID: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, (String, bool)>>,
@@ -1659,7 +1807,9 @@ fn parse_vli(buf: &[u8], mut offset: usize) -> Option<(u64, usize)> {
             return Some((result, offset));
         }
         shift += 7;
-        if shift >= 64 { return None; }
+        if shift >= 64 {
+            return None;
+        }
     }
     None
 }
@@ -1687,7 +1837,9 @@ fn parse_proto_attach(buf: &[u8]) -> Option<ParsedProtoAttach> {
                 let (len, next) = parse_vli(buf, offset)?;
                 offset = next;
                 let len = len as usize;
-                if offset + len > buf.len() { return None; }
+                if offset + len > buf.len() {
+                    return None;
+                }
                 let s = String::from_utf8_lossy(&buf[offset..offset + len]).into_owned();
                 offset += len;
                 match field_num {
@@ -1770,7 +1922,9 @@ fn parse_proto_metadata(buf: &[u8]) -> Option<(Vec<ParsedProtoAttach>, Option<Pa
                 let (len, next) = parse_vli(buf, offset)?;
                 offset = next;
                 let len = len as usize;
-                if offset + len > buf.len() { return None; }
+                if offset + len > buf.len() {
+                    return None;
+                }
                 if field_num == 1 {
                     if let Some(att) = parse_proto_attach(&buf[offset..offset + len]) {
                         attaches.push(att);
@@ -1814,7 +1968,9 @@ fn parse_message(buf: &[u8]) -> Option<ParsedProtoMsg> {
                 let (len, next) = parse_vli(buf, offset)?;
                 offset = next;
                 let len = len as usize;
-                if offset + len > buf.len() { return None; }
+                if offset + len > buf.len() {
+                    return None;
+                }
                 let bytes = &buf[offset..offset + len];
                 offset += len;
                 match field_num {
@@ -1853,7 +2009,9 @@ fn parse_partition(buf: &[u8]) -> Option<ParsedProtoPartition> {
                 let (len, next) = parse_vli(buf, offset)?;
                 offset = next;
                 let len = len as usize;
-                if offset + len > buf.len() { return None; }
+                if offset + len > buf.len() {
+                    return None;
+                }
                 part.id = String::from_utf8_lossy(&buf[offset..offset + len]).into_owned();
                 offset += len;
             }
@@ -1861,7 +2019,9 @@ fn parse_partition(buf: &[u8]) -> Option<ParsedProtoPartition> {
                 let (len, next) = parse_vli(buf, offset)?;
                 offset = next;
                 let len = len as usize;
-                if offset + len > buf.len() { return None; }
+                if offset + len > buf.len() {
+                    return None;
+                }
                 if let Some(m) = parse_message(&buf[offset..offset + len]) {
                     part.messages.push(m);
                 }
@@ -1893,14 +2053,20 @@ pub fn decompress_sync_payload(buf: &[u8]) -> Vec<u8> {
     }
     if buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b {
         let mut out = Vec::new();
-        if flate2::read::GzDecoder::new(buf).read_to_end(&mut out).is_ok() {
+        if flate2::read::GzDecoder::new(buf)
+            .read_to_end(&mut out)
+            .is_ok()
+        {
             return out;
         }
         return buf.to_vec();
     }
     if buf.len() >= 2 && buf[0] == 0x78 {
         let mut out = Vec::new();
-        if flate2::read::ZlibDecoder::new(buf).read_to_end(&mut out).is_ok() {
+        if flate2::read::ZlibDecoder::new(buf)
+            .read_to_end(&mut out)
+            .is_ok()
+        {
             return out;
         }
     }
@@ -1920,7 +2086,9 @@ pub fn parse_sync_chunk(buf: &[u8]) -> Option<Vec<ParsedProtoPartition>> {
                 let (len, next) = parse_vli(buf, offset)?;
                 offset = next;
                 let len = len as usize;
-                if offset + len > buf.len() { return None; }
+                if offset + len > buf.len() {
+                    return None;
+                }
                 if let Some(p) = parse_partition(&buf[offset..offset + len]) {
                     parts.push(p);
                 }
@@ -1995,7 +2163,12 @@ fn format_highlight_msg(obj: &serde_json::Map<String, serde_json::Value>) -> Opt
         .get("vi")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .or_else(|| msg_obj.get("en").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))?;
+        .or_else(|| {
+            msg_obj
+                .get("en")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })?;
     let mut out = base.to_string();
     if let Some(arr) = obj
         .get("highLightsV2")
@@ -2592,12 +2765,9 @@ fn decode_sync_v2_proto_message(
     }
 
     if !is_call_bubble && msg_type_str != "chat.ecall" {
-        if let Some(card) = extract_sync_v2_oa_card(
-            m.msg_type,
-            msg_type_str,
-            &raw_content_snapshot,
-            &attaches,
-        ) {
+        if let Some(card) =
+            extract_sync_v2_oa_card(m.msg_type, msg_type_str, &raw_content_snapshot, &attaches)
+        {
             if let Ok(val) = serde_json::to_value(&card) {
                 raw_meta.insert("oa_card".into(), val);
             }
@@ -2669,13 +2839,29 @@ pub(crate) async fn import_sync_v2_messages_inner(
     sync_id: Option<&str>,
     is_last: bool,
 ) -> Result<usize> {
+    let (imported, _) = import_sync_v2_messages_batch(s, url, sync_id, is_last).await?;
+    Ok(imported)
+}
+
+pub(crate) async fn import_sync_v2_messages_batch(
+    s: &Session,
+    url: &str,
+    sync_id: Option<&str>,
+    is_last: bool,
+) -> Result<(usize, Vec<Thread>)> {
     let uin = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
     let sek = s.zpw_sek.clone().unwrap_or_default();
+    let my_name = s
+        .login
+        .as_ref()
+        .map(|l| l.display_name.clone())
+        .unwrap_or_else(|| "Tôi".into());
     let cookie_hdr = format!("zpw_sek={sek}; zpw_uin={uin}");
 
     let resp = s
         .http
         .get(url)
+        .timeout(Duration::from_secs(60))
         .header("Cookie", cookie_hdr)
         .header("User-Agent", "ZaloPC-win32-26.10.11")
         .send()
@@ -2686,123 +2872,144 @@ pub(crate) async fn import_sync_v2_messages_inner(
     }
 
     let bytes = resp.bytes().await?;
-    // wasmtime host (không cần Node.js). Multi-chunk: decrypt + unpack từng
-    // chunk, nối protobuf bytes lại (đúng luồng HistoryCodec mẫu).
-    let host = crate::zproto_host::ZprotoHost::load()?;
     let session_record = current_v2_session()?;
-    let frames = crate::zproto_host::split_frames(&bytes)?;
-    if frames.is_empty() {
-        anyhow::bail!("gói sync rỗng (không có frame nào)");
-    }
-    let mut parts: Vec<u8> = Vec::new();
-    for chunk in frames {
-        let res = host.decrypt_message(&chunk, &session_record)?;
-        if res.plaintext.is_empty() {
-            anyhow::bail!("giải mã sync trả về rỗng (payload lỗi)");
-        }
-        parts.extend_from_slice(&decompress_sync_payload(&res.plaintext));
-    }
-    let decrypted_bytes = parts;
-    // Nếu batch trả raw còn nén thì Rust tự nhận dạng thêm
-    // (zstd/zlib/gzip — Zalo dùng cả 3 theo HistoryCodec mẫu).
-    let decompressed = decompress_sync_payload(&decrypted_bytes);
-
-    let partitions = parse_sync_chunk(&decompressed).ok_or_else(|| {
-        anyhow::anyhow!(
-            "payload sync hỏng ({} bytes sau giải mã, parse thất bại)",
-            decompressed.len()
-        )
-    })?;
-    let db_path = crate::store::db_path_for_account(&uin);
-    let mut store = crate::store::MessageStore::open(&db_path)?;
-    let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
-    let mut cached_threads = crate::chat::load_threads_cache_for(&uin);
-
-    let mut imported = 0;
-    for part in partitions {
-        let part_msg_count = part.messages.len();
-        let mut part_oa_cards = 0usize;
-        let (mut thread_id, is_group_hint) = map_sync_v2_partition_id(&part.id);
-        let thread_known = cached_threads.iter().any(|t| t.id == thread_id);
-        if !thread_known && is_group_hint != Some(true) {
-            if let Some(peer_uid) = part.messages.iter().find_map(|m| {
-                let sid = m.sender_id.trim();
-                (!sid.is_empty() && sid != uin && sid.bytes().all(|b| b.is_ascii_digit()))
-                    .then(|| sid.to_string())
-            }) {
-                thread_id = peer_uid;
-            }
-        }
-        if !thread_id.is_empty() && !cached_threads.iter().any(|t| t.id == thread_id) {
-            let short: String = thread_id.chars().take(8).collect();
-            cached_threads.push(Thread {
-                id: thread_id.clone(),
-                name: format!("Hội thoại {short}"),
-                is_group: is_group_hint.unwrap_or(false),
-                ..Default::default()
-            });
-        }
-        let peer_thread_name = cached_threads
-            .iter()
-            .find(|t| t.id == thread_id && !t.is_group)
-            .map(|t| t.name.clone())
-            .unwrap_or_default();
-        for m in part.messages {
-            let mt_num = m.msg_type;
-            let att_len = m.attaches.len();
-            let content_len = m.content.len();
-            let att0_diag = m
-                .attaches
-                .first()
-                .map(|a| {
-                    format!(
-                        "t={:?} act={:?} p={} e={} r={}",
-                        a.attach_type,
-                        a.action,
-                        a.params.as_ref().map_or(0, String::len),
-                        a.ext_info.as_ref().map_or(0, String::len),
-                        a.remains.as_ref().map_or(0, String::len)
-                    )
-                })
-                .unwrap_or_default();
-            let sm = decode_sync_v2_proto_message(
-                m,
-                &thread_id,
-                &uin,
-                &my_name,
-                &peer_thread_name,
-            );
-            if sm.raw_json.contains("oa_card") {
-                part_oa_cards += 1;
-            } else if sm.raw_json.is_empty() && (mt_num != 0 || att_len > 0) {
-                crate::logger::log_sync(&format!(
-                    "v2_empty_raw tid={} mid={} mt={} clen={} atts={} {}",
-                    thread_id, sm.msg_id, mt_num, content_len, att_len, att0_diag
-                ));
-            }
-
-            if store.upsert_message(&sm).unwrap_or(false) {
-                imported += 1;
-            }
-        }
-        crate::logger::log_sync(&format!(
-            "v2_part part={} -> tid={} msgs={} oa_cards={}",
-            part.id, thread_id, part_msg_count, part_oa_cards
-        ));
-    }
-
-    let _ = store.hydrate_threads(&mut cached_threads, 50);
-    crate::chat::save_threads_cache_for(&uin, &cached_threads);
-
-    // Không xoá `SYNC_V2_SESSIONS` ngay tại `is_last == true` vì các gói upload
-    // song song có thể tới trễ hơn gói `isLast=1` vài trăm ms; việc dọn session
-    // được thực hiện tập trung ở cuối Phase 1 sau khi gửi `cmd 591`.
     let _ = (sync_id, is_last);
 
-    // Keys/session giữ trong bộ nhớ tiến trình (CURRENT_V2_KEYS/_SESSION),
-    // không còn file temp sync_v2_*.bin/json của helper JS.
+    tokio::task::spawn_blocking(move || -> Result<(usize, Vec<Thread>)> {
+        let host = crate::zproto_host::ZprotoHost::load()?;
+        let frames = crate::zproto_host::split_frames(&bytes)?;
+        if frames.is_empty() {
+            anyhow::bail!("gói sync rỗng (không có frame nào)");
+        }
+        let mut parts: Vec<u8> = Vec::new();
+        for chunk in frames {
+            let res = host.decrypt_message(&chunk, &session_record)?;
+            if res.plaintext.is_empty() {
+                anyhow::bail!("giải mã sync trả về rỗng (payload lỗi)");
+            }
+            parts.extend_from_slice(&decompress_sync_payload(&res.plaintext));
+        }
+        let decompressed = decompress_sync_payload(&parts);
 
-    Ok(imported)
+        let partitions = parse_sync_chunk(&decompressed).ok_or_else(|| {
+            anyhow::anyhow!(
+                "payload sync hỏng ({} bytes sau giải mã, parse thất bại)",
+                decompressed.len()
+            )
+        })?;
+
+        let db_path = crate::store::db_path_for_account(&uin);
+        let mut cached_threads = crate::chat::load_threads_cache_for(&uin);
+        let mut batch_threads: Vec<crate::store::StoredThread> = Vec::new();
+        let mut batch_messages: Vec<crate::store::StoredMessage> = Vec::new();
+        let mut touched_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for part in partitions {
+            let part_msg_count = part.messages.len();
+            let mut part_oa_cards = 0usize;
+            let (mut thread_id, is_group_hint) = map_sync_v2_partition_id(&part.id);
+            let thread_known = cached_threads.iter().any(|t| t.id == thread_id);
+            if !thread_known && is_group_hint != Some(true) {
+                if let Some(peer_uid) = part.messages.iter().find_map(|m| {
+                    let sid = m.sender_id.trim();
+                    (!sid.is_empty() && sid != uin && sid.bytes().all(|b| b.is_ascii_digit()))
+                        .then(|| sid.to_string())
+                }) {
+                    thread_id = peer_uid;
+                }
+            }
+            if thread_id.is_empty() || thread_id == "0" {
+                continue;
+            }
+            touched_ids.insert(thread_id.clone());
+            let is_group = cached_threads
+                .iter()
+                .find(|t| t.id == thread_id)
+                .map(|t| t.is_group)
+                .or(is_group_hint)
+                .unwrap_or(false);
+            if !cached_threads.iter().any(|t| t.id == thread_id) {
+                let short: String = thread_id.chars().take(8).collect();
+                cached_threads.push(Thread {
+                    id: thread_id.clone(),
+                    name: format!("Hội thoại {short}"),
+                    is_group,
+                    ..Default::default()
+                });
+            }
+            let thread_name = cached_threads
+                .iter()
+                .find(|t| t.id == thread_id)
+                .map(|t| t.name.clone())
+                .unwrap_or_default();
+            let peer_thread_name = if is_group {
+                String::new()
+            } else {
+                thread_name.clone()
+            };
+
+            let mut max_ts = 0_i64;
+            for m in part.messages {
+                let mt_num = m.msg_type;
+                let att_len = m.attaches.len();
+                let content_len = m.content.len();
+                let att0_diag = m
+                    .attaches
+                    .first()
+                    .map(|a| {
+                        format!(
+                            "t={:?} act={:?} p={} e={} r={}",
+                            a.attach_type,
+                            a.action,
+                            a.params.as_ref().map_or(0, String::len),
+                            a.ext_info.as_ref().map_or(0, String::len),
+                            a.remains.as_ref().map_or(0, String::len)
+                        )
+                    })
+                    .unwrap_or_default();
+                let sm =
+                    decode_sync_v2_proto_message(m, &thread_id, &uin, &my_name, &peer_thread_name);
+                if sm.ts > max_ts {
+                    max_ts = sm.ts;
+                }
+                if sm.raw_json.contains("oa_card") {
+                    part_oa_cards += 1;
+                } else if sm.raw_json.is_empty() && (mt_num != 0 || att_len > 0) {
+                    crate::logger::log_sync(&format!(
+                        "v2_empty_raw tid={} mid={} mt={} clen={} atts={} {}",
+                        thread_id, sm.msg_id, mt_num, content_len, att_len, att0_diag
+                    ));
+                }
+                batch_messages.push(sm);
+            }
+            batch_threads.push(crate::store::StoredThread {
+                thread_id: thread_id.clone(),
+                name: thread_name,
+                is_group,
+                last_ts: max_ts,
+                vanish_duration_sec: 0,
+                vanish_started_at_sec: 0,
+                last_read_msg_id: String::new(),
+            });
+            crate::logger::log_sync(&format!(
+                "v2_part part={} -> tid={} msgs={} oa_cards={}",
+                part.id, thread_id, part_msg_count, part_oa_cards
+            ));
+        }
+
+        let mut store = crate::store::MessageStore::open(&db_path)?;
+        let imported =
+            crate::store::persist_synced_batch(&mut store, &batch_threads, &batch_messages)?;
+        let _ = store.hydrate_threads_subset(&mut cached_threads, &touched_ids, 100);
+        crate::chat::save_threads_cache_for(&uin, &cached_threads);
+        let touched_threads: Vec<Thread> = cached_threads
+            .into_iter()
+            .filter(|t| touched_ids.contains(&t.id))
+            .collect();
+
+        Ok((imported, touched_threads))
+    })
+    .await?
 }
 #[cfg(test)]
 mod tests {
@@ -2884,7 +3091,6 @@ mod tests {
         assert_eq!(raw.len(), 294);
         assert_eq!(&raw[raw.len() - 5..], &[0x02, 0x03, 0x01, 0x00, 0x01]);
     }
-
 
     #[test]
     fn extract_mobile_sync_controls_parses_v1_and_v2_events() {
@@ -2989,17 +3195,35 @@ mod tests {
 
     #[test]
     fn sync_v2_batch_dedup_marks_each_url_once() {
-        assert!(mark_sync_v2_batch_seen("s_dedup_1", 2, "https://f.zalo.me/meta"));
-        assert!(!mark_sync_v2_batch_seen("s_dedup_1", 2, "https://f.zalo.me/meta"));
-        assert!(mark_sync_v2_batch_seen("s_dedup_1", 1, "https://f.zalo.me/msg1"));
-        assert!(!mark_sync_v2_batch_seen("s_dedup_1", 1, "https://f.zalo.me/msg1"));
+        assert!(mark_sync_v2_batch_seen(
+            "s_dedup_1",
+            2,
+            "https://f.zalo.me/meta"
+        ));
+        assert!(!mark_sync_v2_batch_seen(
+            "s_dedup_1",
+            2,
+            "https://f.zalo.me/meta"
+        ));
+        assert!(mark_sync_v2_batch_seen(
+            "s_dedup_1",
+            1,
+            "https://f.zalo.me/msg1"
+        ));
+        assert!(!mark_sync_v2_batch_seen(
+            "s_dedup_1",
+            1,
+            "https://f.zalo.me/msg1"
+        ));
     }
 
     #[test]
     fn backup_v1_url_dedup_and_reset_work() {
         assert!(!mark_backup_url_seen("   "));
         assert!(mark_backup_url_seen("https://f.zalo.me/v1_backup.db.crypt"));
-        assert!(!mark_backup_url_seen("https://f.zalo.me/v1_backup.db.crypt"));
+        assert!(!mark_backup_url_seen(
+            "https://f.zalo.me/v1_backup.db.crypt"
+        ));
         set_latest_mobile_temp_key("tmp_k");
         set_last_mobile_sync_status(Some("ok".into()));
         reset_for_account_switch();
@@ -3168,7 +3392,9 @@ mod tests {
         assert_eq!(oa_list.msg_type, "chat.list.action");
         assert!(oa_list.raw_json.contains("oa_card"));
         assert!(oa_list.raw_json.contains("Gói chủ đề mới"));
-        assert!(oa_list.raw_json.contains("https://cdn.zalo.me/zstyle_banner.jpg"));
+        assert!(oa_list
+            .raw_json
+            .contains("https://cdn.zalo.me/zstyle_banner.jpg"));
 
         let webcontent = decode_sync_v2_proto_message(
             ParsedProtoMsg {
@@ -3192,7 +3418,9 @@ mod tests {
         );
         assert_eq!(webcontent.msg_type, "chat.webcontent.v2");
         assert!(webcontent.raw_json.contains("oa_card"));
-        assert!(webcontent.raw_json.contains("https://cdn.zalo.me/weather_banner.jpg"));
+        assert!(webcontent
+            .raw_json
+            .contains("https://cdn.zalo.me/weather_banner.jpg"));
         assert!(webcontent.raw_json.contains("Tin ngày 22/11"));
         assert!(webcontent.raw_json.contains("LỊCH ÂM"));
     }

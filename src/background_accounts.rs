@@ -186,10 +186,37 @@ async fn listen(account: AccountProfile, sink: ActivitySink) {
         return;
     }
 
+    if let Ok(Ok(mute_resp)) = tokio::time::timeout(
+        Duration::from_secs(NAME_RESOLVE_SECS),
+        crate::chat::get_mute_conversations(&session),
+    )
+    .await
+    {
+        crate::unread::merge_mute_metadata(&mut known, &mute_resp);
+    }
+
     let started_ms = crate::clock::normalize_ts_ms(crate::login::unix_now());
     let mut notified: HashSet<String> = HashSet::new();
     let mut events = crate::socket::spawn_passive(session.clone());
     while let Some(event) = events.recv().await {
+        let data_node = event.payload.get("data").unwrap_or(&event.payload);
+        let mute_evs = crate::chat::extract_mute_controls(data_node, crate::login::unix_now());
+        for mev in mute_evs {
+            for k in &mut known {
+                if crate::unread::thread_matches_mute_id(
+                    &k.id,
+                    k.is_group,
+                    &mev.thread_id,
+                    mev.is_group,
+                ) {
+                    k.presentation.muted = mev.muted;
+                    k.unread.muted = mev.muted;
+                    k.unread.muted_until = mev.muted_until;
+                    k.unread.settings_fresh = true;
+                    k.unread.fresh = true;
+                }
+            }
+        }
         if !event.is_chat_ish() {
             continue;
         }
@@ -200,16 +227,21 @@ async fn listen(account: AccountProfile, sink: ActivitySink) {
             continue;
         }
 
-        let has_new_thread = touched
-            .iter()
-            .any(|t| !known.iter().any(|k| k.id == t.id));
+        let has_new_thread = touched.iter().any(|t| !known.iter().any(|k| k.id == t.id));
         if has_new_thread {
-            // Best effort: on timeout the placeholder name ("Người dùng <id>") is kept.
             let _ = tokio::time::timeout(
                 Duration::from_secs(NAME_RESOLVE_SECS),
                 crate::chat::resolve_thread_names(&session, &mut touched),
             )
             .await;
+            if let Ok(Ok(mute_resp)) = tokio::time::timeout(
+                Duration::from_secs(NAME_RESOLVE_SECS),
+                crate::chat::get_mute_conversations(&session),
+            )
+            .await
+            {
+                crate::unread::merge_mute_metadata(&mut touched, &mute_resp);
+            }
             for thread in &touched {
                 if !known.iter().any(|k| k.id == thread.id) {
                     let mut shell = thread.clone();
@@ -414,8 +446,7 @@ mod tests {
             }]
         );
         assert!(
-            collect_activity(&account("1001"), &touched, true, STARTED_MS, &mut notified)
-                .is_none()
+            collect_activity(&account("1001"), &touched, true, STARTED_MS, &mut notified).is_none()
         );
     }
 
@@ -479,7 +510,12 @@ mod tests {
         let stale = vec![thread(
             "thread-1",
             false,
-            vec![message("msg-0003", "a", false, STARTED_MS - 10 * FRESH_SLACK_MS)],
+            vec![message(
+                "msg-0003",
+                "a",
+                false,
+                STARTED_MS - 10 * FRESH_SLACK_MS,
+            )],
         )];
         assert!(collect_activity(
             &account("1001"),

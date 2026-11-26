@@ -106,7 +106,12 @@ pub(crate) fn format_sidebar_time(ts_raw: i64, now_unix_secs: i64, fallback: &st
     } else if dt.year() == now_dt.year() {
         format!("{:02}/{:02}", dt.day(), dt.month())
     } else {
-        format!("{:02}/{:02}/{:02}", dt.day(), dt.month(), dt.year().rem_euclid(100))
+        format!(
+            "{:02}/{:02}/{:02}",
+            dt.day(),
+            dt.month(),
+            dt.year().rem_euclid(100)
+        )
     }
 }
 
@@ -114,7 +119,11 @@ fn fit_text_to_width(ui: &egui::Ui, text: &str, font: &FontId, max_w: f32) -> St
     if max_w < 8.0 || text.is_empty() {
         return String::new();
     }
-    let full_w = ui.fonts(|f| f.layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE).size().x);
+    let full_w = ui.fonts(|f| {
+        f.layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE)
+            .size()
+            .x
+    });
     if full_w <= max_w {
         return text.to_string();
     }
@@ -125,7 +134,11 @@ fn fit_text_to_width(ui: &egui::Ui, text: &str, font: &FontId, max_w: f32) -> St
         let mid = (lo + hi + 1) / 2;
         let mut candidate: String = chars[..mid].iter().collect();
         candidate.push('…');
-        let w = ui.fonts(|f| f.layout_no_wrap(candidate, font.clone(), Color32::WHITE).size().x);
+        let w = ui.fonts(|f| {
+            f.layout_no_wrap(candidate, font.clone(), Color32::WHITE)
+                .size()
+                .x
+        });
         if w <= max_w {
             lo = mid;
         } else {
@@ -169,7 +182,15 @@ pub(crate) fn replace_active_mention_in_text(
 }
 
 /// Cached sidebar filter+sort result (query, filter, len, fingerprint, selected, indices, at).
-pub(crate) type ThreadListCache = Option<(String, String, usize, u64, usize, Vec<usize>, std::time::Instant)>;
+pub(crate) type ThreadListCache = Option<(
+    String,
+    String,
+    usize,
+    u64,
+    usize,
+    Vec<usize>,
+    std::time::Instant,
+)>;
 
 impl ZaloGuiApp {
     /// Start loading the full-resolution texture the image viewer shows. Message bubbles and
@@ -316,11 +337,8 @@ impl ZaloGuiApp {
                             Pos2::new(nav1_rect.right() - 6.0, nav1_rect.top() + 7.0),
                             Vec2::new(bw, 15.0),
                         );
-                        ui.painter().rect_filled(
-                            badge_rect,
-                            Rounding::same(7.5),
-                            pal.danger,
-                        );
+                        ui.painter()
+                            .rect_filled(badge_rect, Rounding::same(7.5), pal.danger);
                         ui.painter().rect_stroke(
                             badge_rect,
                             Rounding::same(7.5),
@@ -1520,12 +1538,13 @@ impl ZaloGuiApp {
                                 );
                             let is_pinned_cloud =
                                 t.name.contains("Cloud của tôi") || is_user_pinned;
-                            let is_muted = self
-                                .settings
-                                .muted_threads
-                                .get(&t.id)
-                                .map(|&until| until == -1 || until > now_unix)
-                                .unwrap_or(false)
+                            let is_muted = crate::unread::muted_until_in_map(
+                                &self.settings.muted_threads,
+                                &t.id,
+                                t.is_group,
+                                now_unix,
+                            )
+                            .is_some()
                                 || t.presentation.muted
                                 || t.unread.is_muted();
                             let is_hidden = self.settings.hidden_threads.contains(&t.id)
@@ -2562,22 +2581,18 @@ impl ZaloGuiApp {
                             }
                         }
                         ThreadCtxAction::SetMute(tid, is_group, dur_opt, toast_txt) => {
-                            let (dur_sec, mute) = match dur_opt {
-                                Some(-1) => {
-                                    self.settings.muted_threads.insert(tid.clone(), -1);
-                                    (-1, true)
-                                }
-                                Some(d) => {
-                                    self.settings
-                                        .muted_threads
-                                        .insert(tid.clone(), now_unix + d);
-                                    (d, true)
-                                }
-                                None => {
-                                    self.settings.muted_threads.remove(&tid);
-                                    (-1, false)
-                                }
+                            let (dur_sec, mute, until_opt) = match dur_opt {
+                                Some(-1) => (-1, true, Some(-1)),
+                                Some(d) => (d, true, Some(now_unix + d)),
+                                None => (-1, false, None),
                             };
+                            crate::unread::set_muted_in_map(
+                                &mut self.settings.muted_threads,
+                                &tid,
+                                is_group,
+                                until_opt,
+                            );
+                            let mut dirty_ids = HashSet::new();
                             if let Some(th) = self.threads.iter_mut().find(|t| t.id == tid) {
                                 th.presentation.muted = mute;
                                 th.unread.muted = mute;
@@ -2588,9 +2603,13 @@ impl ZaloGuiApp {
                                 };
                                 th.unread.settings_fresh = true;
                                 th.unread.fresh = true;
+                                dirty_ids.insert(th.id.clone());
+                            }
+                            if mute {
+                                self.dismiss_popup_if_thread(&tid, is_group);
                             }
                             self.settings.save();
-                            self.persist_threads_async();
+                            self.persist_dirty_threads_async(&dirty_ids);
                             self.show_toast(toast_txt);
                             if let Some(tx) = WORKER_TX.get() {
                                 let _ = tx.send(WorkerCmd::MuteThread {
@@ -2732,20 +2751,22 @@ impl ZaloGuiApp {
                             self.group_note_save_retry_at.remove(d_id);
                             let tid = d_id.clone();
                             let uin = self.user_uin.clone();
-                            let draft =
-                                self.group_note_drafts.get(d_id).cloned().unwrap_or_default();
+                            let draft = self
+                                .group_note_drafts
+                                .get(d_id)
+                                .cloned()
+                                .unwrap_or_default();
                             let tx = self.event_tx.clone();
                             std::thread::spawn(move || {
                                 let db = crate::store::db_path_for_account(&uin);
-                                let res = crate::store::MessageStore::open(&db).and_then(
-                                    |mut st| {
+                                let res =
+                                    crate::store::MessageStore::open(&db).and_then(|mut st| {
                                         st.set_group_note(
                                             &tid,
                                             &draft,
                                             chrono::Local::now().timestamp(),
                                         )
-                                    },
-                                );
+                                    });
                                 match res {
                                     Ok(()) => {
                                         let saved_at = crate::clock::message_time(
@@ -2773,7 +2794,9 @@ impl ZaloGuiApp {
         }
 
         if show_info_drawer {
-            if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count, ref d_vanish)) = thread_meta {
+            if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count, ref d_vanish)) =
+                thread_meta
+            {
                 let shared_photos: Vec<(String, String, String, String)> = self
                     .threads
                     .get(self.selected_thread_index)
@@ -2814,7 +2837,15 @@ impl ZaloGuiApp {
                     .unwrap_or_default();
 
                 // Extract shared Files / Videos from messages
-                let shared_files: Vec<(String, String, String, &'static str, Color32, String, String)> = self
+                let shared_files: Vec<(
+                    String,
+                    String,
+                    String,
+                    &'static str,
+                    Color32,
+                    String,
+                    String,
+                )> = self
                     .threads
                     .get(self.selected_thread_index)
                     .map(|t| {
@@ -2866,7 +2897,11 @@ impl ZaloGuiApp {
                                     {
                                         ("ZIP", Color32::from_rgb(217, 119, 6), "Nén")
                                     } else {
-                                        (lucide::FILE_TEXT, Color32::from_rgb(100, 116, 139), "Tập tin")
+                                        (
+                                            lucide::FILE_TEXT,
+                                            Color32::from_rgb(100, 116, 139),
+                                            "Tập tin",
+                                        )
                                     };
                                 let sub_lbl = m
                                     .link_desc
@@ -2907,12 +2942,16 @@ impl ZaloGuiApp {
                                 let raw_url = m
                                     .link_url
                                     .as_deref()
-                                    .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+                                    .filter(|u| {
+                                        u.starts_with("http://") || u.starts_with("https://")
+                                    })
                                     .or_else(|| {
                                         let txt = m.text.trim();
-                                        let pos = txt.find("https://").or_else(|| txt.find("http://"))?;
+                                        let pos =
+                                            txt.find("https://").or_else(|| txt.find("http://"))?;
                                         let after = &txt[pos..];
-                                        let end = after.find(char::is_whitespace).unwrap_or(after.len());
+                                        let end =
+                                            after.find(char::is_whitespace).unwrap_or(after.len());
                                         Some(&after[..end])
                                     })?;
                                 if crate::chat::is_zalo_photo_cdn_url(raw_url) {
@@ -2949,63 +2988,70 @@ impl ZaloGuiApp {
                             .iter()
                             .rev()
                             .filter(|m| m.is_pinned)
-                            .map(|m| (m.id.clone(), m.sender.clone(), m.text.clone(), m.time.clone()))
+                            .map(|m| {
+                                (
+                                    m.id.clone(),
+                                    m.sender.clone(),
+                                    m.text.clone(),
+                                    m.time.clone(),
+                                )
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
 
                 let mut close_drawer_requested = false;
                 let mut render_drawer_inner = |ui: &mut egui::Ui, close_req: &mut bool| {
-                        let drawer_rect = ui.max_rect();
-                        ui.set_clip_rect(drawer_rect);
-                        ui.set_max_width(drawer_w);
-                        // 0. Top Header ("Thông tin nhóm" / "Thông tin hội thoại") matching native Zalo
-                        egui::Frame::none()
-                            .fill(pal.bg_sidebar)
-                            .inner_margin(Margin::symmetric(16.0, 13.0))
-                            .show(ui, |ui| {
-                                ui.set_width(drawer_w - 32.0);
-                                ui.horizontal(|ui| {
-                                    ui.add_space(22.0);
-                                    let title_w = (ui.available_width() - 26.0).max(60.0);
-                                    ui.allocate_ui_with_layout(
-                                        Vec2::new(title_w, 22.0),
-                                        Layout::centered_and_justified(egui::Direction::LeftToRight),
-                                        |ui| {
-                                            ui.label(
-                                                RichText::new(if d_is_group {
-                                                    "Thông tin nhóm"
-                                                } else {
-                                                    "Thông tin hội thoại"
-                                                })
-                                                .size(14.5)
-                                                .color(pal.text_primary)
-                                                .strong(),
-                                            );
-                                        },
-                                    );
-                                    let close_btn = ui.add(
-                                        egui::Button::new(
-                                            RichText::new(lucide::X)
-                                                .size(13.0)
-                                                .color(pal.text_secondary),
-                                        )
-                                        .frame(false)
-                                        .min_size(Vec2::new(22.0, 22.0)),
-                                    );
-                                    if close_btn
-                                        .on_hover_cursor(CursorIcon::PointingHand)
-                                        .on_hover_text("Đóng")
-                                        .clicked()
-                                    {
-                                        *close_req = true;
-                                    }
-                                });
+                    let drawer_rect = ui.max_rect();
+                    ui.set_clip_rect(drawer_rect);
+                    ui.set_max_width(drawer_w);
+                    // 0. Top Header ("Thông tin nhóm" / "Thông tin hội thoại") matching native Zalo
+                    egui::Frame::none()
+                        .fill(pal.bg_sidebar)
+                        .inner_margin(Margin::symmetric(16.0, 13.0))
+                        .show(ui, |ui| {
+                            ui.set_width(drawer_w - 32.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(22.0);
+                                let title_w = (ui.available_width() - 26.0).max(60.0);
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(title_w, 22.0),
+                                    Layout::centered_and_justified(egui::Direction::LeftToRight),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(if d_is_group {
+                                                "Thông tin nhóm"
+                                            } else {
+                                                "Thông tin hội thoại"
+                                            })
+                                            .size(14.5)
+                                            .color(pal.text_primary)
+                                            .strong(),
+                                        );
+                                    },
+                                );
+                                let close_btn = ui.add(
+                                    egui::Button::new(
+                                        RichText::new(lucide::X)
+                                            .size(13.0)
+                                            .color(pal.text_secondary),
+                                    )
+                                    .frame(false)
+                                    .min_size(Vec2::new(22.0, 22.0)),
+                                );
+                                if close_btn
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text("Đóng")
+                                    .clicked()
+                                {
+                                    *close_req = true;
+                                }
                             });
-                        ui.add(egui::Separator::default().spacing(1.0));
+                        });
+                    ui.add(egui::Separator::default().spacing(1.0));
 
-                        // Toàn bộ drawer cuộn dọc
-                        egui::ScrollArea::vertical()
+                    // Toàn bộ drawer cuộn dọc
+                    egui::ScrollArea::vertical()
                             .id_salt("info_drawer_scroll")
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
@@ -3185,8 +3231,17 @@ impl ZaloGuiApp {
                                     ui.add_space(14.0);
 
                                     // 4 Circular Icon Action Buttons (matching native Zalo Desktop)
-                                    let is_muted = self.settings.muted_threads.contains_key(d_id);
-                                    let is_pinned = self.settings.pinned_threads.contains(d_id);
+                                    let is_muted = self.is_thread_muted_now(
+                                        d_id,
+                                        d_is_group,
+                                        crate::login::unix_now(),
+                                    );
+                                    let is_pinned = self.settings.pinned_threads.contains(d_id)
+                                        || crate::chat::is_pinned_in_list(
+                                            d_id,
+                                            d_is_group,
+                                            &self.settings.pinned_threads,
+                                        );
                                     let col_w = ((drawer_w - 24.0) / 4.0).max(58.0);
 
                                     ui.horizontal(|ui| {
@@ -3254,12 +3309,13 @@ impl ZaloGuiApp {
                                         .clicked()
                                         {
                                             let new_mute = !is_muted;
-                                            let dur_sec = if new_mute { -1 } else { 0 };
-                                            if new_mute {
-                                                self.settings.muted_threads.insert(d_id.clone(), -1);
-                                            } else {
-                                                self.settings.muted_threads.remove(d_id);
-                                            }
+                                            crate::unread::set_muted_in_map(
+                                                &mut self.settings.muted_threads,
+                                                d_id,
+                                                d_is_group,
+                                                new_mute.then_some(-1),
+                                            );
+                                            let mut dirty_ids = HashSet::new();
                                             if let Some(th) =
                                                 self.threads.iter_mut().find(|t| &t.id == d_id)
                                             {
@@ -3268,9 +3324,13 @@ impl ZaloGuiApp {
                                                 th.unread.muted_until = None;
                                                 th.unread.settings_fresh = true;
                                                 th.unread.fresh = true;
+                                                dirty_ids.insert(th.id.clone());
+                                            }
+                                            if new_mute {
+                                                self.dismiss_popup_if_thread(d_id, d_is_group);
                                             }
                                             self.settings.save();
-                                            self.persist_threads_async();
+                                            self.persist_dirty_threads_async(&dirty_ids);
                                             self.show_toast(if new_mute {
                                                 "🔕 Đã tắt thông báo hội thoại"
                                             } else {
@@ -3280,7 +3340,7 @@ impl ZaloGuiApp {
                                                 let _ = tx.send(WorkerCmd::MuteThread {
                                                     thread_id: d_id.clone(),
                                                     is_group: d_is_group,
-                                                    duration_sec: dur_sec,
+                                                    duration_sec: -1,
                                                     mute: new_mute,
                                                 });
                                             }
@@ -5418,7 +5478,10 @@ impl ZaloGuiApp {
                             .show(ctx, |ui| {
                                 let dim_rect = egui::Rect::from_min_size(
                                     Pos2::new(screen.left(), top_offset),
-                                    Vec2::new((screen.width() - drawer_w * drawer_slide_t).max(0.0), avail_h),
+                                    Vec2::new(
+                                        (screen.width() - drawer_w * drawer_slide_t).max(0.0),
+                                        avail_h,
+                                    ),
                                 );
                                 ui.painter().rect_filled(
                                     dim_rect,
@@ -6891,6 +6954,7 @@ impl ZaloGuiApp {
                     let mut poll_actions: Vec<(String, PollCardAction)> = Vec::new();
                     let mut poll_fetches: Vec<(String, i64)> = Vec::new();
                     let mut load_older_clicked = false;
+                    let is_loading_older = self.loading_older_threads.contains(&thread_id);
                     let mut custom_toast: Option<String> = None;
                     // each frame, so a 2 000-message group re-laid out 2 000 galleys per repaint.
                     // "Tải thêm tin nhắn cũ" widens the window before asking the server.
@@ -7013,19 +7077,27 @@ impl ZaloGuiApp {
                                                     });
                                                 } else {
                                                     ui.vertical_centered(|ui| {
-                                                        let hist_btn = egui::Button::new(
-                                                            RichText::new(format!(
+                                                        let server_loading =
+                                                            is_loading_older && !has_more_in_memory;
+                                                        let label = if server_loading {
+                                                            "⏳ Đang tải thêm tin nhắn cũ…"
+                                                                .to_string()
+                                                        } else {
+                                                            format!(
                                                                 "{} Tải thêm tin nhắn cũ",
                                                                 lucide::REFRESH
-                                                            ))
-                                                            .size(11.5)
-                                                            .color(pal.text_secondary),
+                                                            )
+                                                        };
+                                                        let hist_btn = egui::Button::new(
+                                                            RichText::new(label)
+                                                                .size(11.5)
+                                                                .color(pal.text_secondary),
                                                         )
                                                         .fill(pal.bg_elevated)
                                                         .stroke(Stroke::new(1.0_f32, pal.border))
                                                         .rounding(Rounding::same(12.0));
                                                         if ui
-                                                            .add(hist_btn)
+                                                            .add_enabled(!server_loading, hist_btn)
                                                             .on_hover_cursor(CursorIcon::PointingHand)
                                                             .on_hover_text(
                                                                 "Đồng bộ thêm lịch sử tin nhắn cũ từ máy chủ Zalo",
@@ -7393,6 +7465,7 @@ impl ZaloGuiApp {
                     if let Some(msg) = custom_toast {
                         self.show_toast(msg);
                     } else if load_older_clicked {
+                        self.loading_older_threads.insert(thread_id.clone());
                         self.show_toast("Đang kiểm tra tin nhắn cũ từ máy chủ Zalo…");
                     }
                     if let Some((idx, action)) = pending_action {
@@ -9373,13 +9446,18 @@ impl ZaloGuiApp {
                         let _ = store.delete_thread(&tid_bg);
                     }
                 });
-                if let Some(pos) = self.threads.iter().position(|t| t.id == del_tid).or_else(|| {
-                    if del_idx < self.threads.len() {
-                        Some(del_idx)
-                    } else {
-                        None
-                    }
-                }) {
+                if let Some(pos) = self
+                    .threads
+                    .iter()
+                    .position(|t| t.id == del_tid)
+                    .or_else(|| {
+                        if del_idx < self.threads.len() {
+                            Some(del_idx)
+                        } else {
+                            None
+                        }
+                    })
+                {
                     self.threads.remove(pos);
                     if self.selected_thread_index >= self.threads.len() && !self.threads.is_empty()
                     {
@@ -9488,15 +9566,21 @@ impl ZaloGuiApp {
                         let _ = store.delete_thread(&tid_bg);
                     }
                 });
-                if let Some(pos) = self.threads.iter().position(|t| t.id == del_tid).or_else(|| {
-                    if del_idx < self.threads.len() {
-                        Some(del_idx)
-                    } else {
-                        None
-                    }
-                }) {
+                if let Some(pos) = self
+                    .threads
+                    .iter()
+                    .position(|t| t.id == del_tid)
+                    .or_else(|| {
+                        if del_idx < self.threads.len() {
+                            Some(del_idx)
+                        } else {
+                            None
+                        }
+                    })
+                {
                     self.threads.remove(pos);
-                    if self.selected_thread_index >= self.threads.len() && !self.threads.is_empty() {
+                    if self.selected_thread_index >= self.threads.len() && !self.threads.is_empty()
+                    {
                         self.selected_thread_index = self.threads.len() - 1;
                     }
                 }
@@ -9526,13 +9610,13 @@ impl ZaloGuiApp {
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // 2 tab nhỏ: Danh sách / Soạn thảo.
-                let list_btn = egui::Button::new(
-                    RichText::new("Danh sách").size(10.5).color(if self.script_tab == 0 {
+                let list_btn = egui::Button::new(RichText::new("Danh sách").size(10.5).color(
+                    if self.script_tab == 0 {
                         pal.primary_hover
                     } else {
                         pal.text_muted
-                    }),
-                )
+                    },
+                ))
                 .fill(Color32::TRANSPARENT)
                 .frame(false);
                 if ui
@@ -9544,13 +9628,13 @@ impl ZaloGuiApp {
                     self.script_editing_id = None;
                 }
                 ui.label(RichText::new("·").size(10.5).color(pal.text_muted));
-                let edit_btn = egui::Button::new(
-                    RichText::new("＋ Mới").size(10.5).color(if self.script_tab == 1 {
+                let edit_btn = egui::Button::new(RichText::new("＋ Mới").size(10.5).color(
+                    if self.script_tab == 1 {
                         pal.primary_hover
                     } else {
                         pal.text_muted
-                    }),
-                )
+                    },
+                ))
                 .fill(Color32::TRANSPARENT)
                 .frame(false);
                 if ui
@@ -9574,7 +9658,8 @@ impl ZaloGuiApp {
             return;
         }
         // ── List scripts của thread (nạp off-UI-thread qua GuiEvent, cache theo thread) ──
-        if !self.script_list_cache.contains_key(&tid) && !self.script_loading_threads.contains(&tid) {
+        if !self.script_list_cache.contains_key(&tid) && !self.script_loading_threads.contains(&tid)
+        {
             self.script_loading_threads.insert(tid.clone());
             let tid_bg = tid.clone();
             let uin_bg = self.user_uin.clone();
@@ -9582,7 +9667,12 @@ impl ZaloGuiApp {
             std::thread::spawn(move || {
                 let db = crate::store::db_path_for_account(&uin_bg);
                 let (scripts, logs) = crate::store::MessageStore::open(&db)
-                    .map(|s| (s.list_thread_scripts(&tid_bg), s.list_script_logs(&tid_bg, 30)))
+                    .map(|s| {
+                        (
+                            s.list_thread_scripts(&tid_bg),
+                            s.list_script_logs(&tid_bg, 30),
+                        )
+                    })
                     .unwrap_or_default();
                 let _ = tx_bg.send(crate::gui::GuiEvent::ThreadScriptsLoaded {
                     thread_id: tid_bg,
@@ -9591,7 +9681,11 @@ impl ZaloGuiApp {
                 });
             });
         }
-        let scripts = self.script_list_cache.get(&tid).cloned().unwrap_or_default();
+        let scripts = self
+            .script_list_cache
+            .get(&tid)
+            .cloned()
+            .unwrap_or_default();
         // ── Nút "+ Mẫu" (3 template kèm sẵn) ──
         ui.horizontal_wrapped(|ui| {
             ui.label(
@@ -9600,20 +9694,18 @@ impl ZaloGuiApp {
                     .color(pal.text_muted),
             );
             for (tpl_id, tpl_label, _, _) in crate::thread_script::builtin_templates() {
-                let b = egui::Button::new(
-                    RichText::new(tpl_label).size(10.0).color(pal.primary_hover),
-                )
-                .fill(pal.primary.linear_multiply(0.10))
-                .stroke(Stroke::new(1.0_f32, pal.primary))
-                .rounding(Rounding::same(6.0));
+                let b =
+                    egui::Button::new(RichText::new(tpl_label).size(10.0).color(pal.primary_hover))
+                        .fill(pal.primary.linear_multiply(0.10))
+                        .stroke(Stroke::new(1.0_f32, pal.primary))
+                        .rounding(Rounding::same(6.0));
                 if ui
                     .add(b)
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .on_hover_text(format!("Tạo script từ mẫu {tpl_id}"))
                     .clicked()
                 {
-                    if let Some((code, trig)) =
-                        crate::thread_script::builtin_template_code(tpl_id)
+                    if let Some((code, trig)) = crate::thread_script::builtin_template_code(tpl_id)
                     {
                         let name = tpl_label.to_string();
                         let tid_bg = tid.clone();
@@ -9683,7 +9775,10 @@ impl ZaloGuiApp {
                     toggle_req = Some((s.id, on));
                 }
                 let name_txt = if s.enabled {
-                    RichText::new(&s.name).size(11.0).color(pal.text_primary).strong()
+                    RichText::new(&s.name)
+                        .size(11.0)
+                        .color(pal.text_primary)
+                        .strong()
                 } else {
                     RichText::new(&s.name).size(11.0).color(pal.text_muted)
                 };
@@ -9696,11 +9791,9 @@ impl ZaloGuiApp {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui
                         .add(
-                            egui::Button::new(
-                                RichText::new("✕").size(10.5).color(pal.text_muted),
-                            )
-                            .fill(Color32::TRANSPARENT)
-                            .frame(false),
+                            egui::Button::new(RichText::new("✕").size(10.5).color(pal.text_muted))
+                                .fill(Color32::TRANSPARENT)
+                                .frame(false),
                         )
                         .on_hover_cursor(CursorIcon::PointingHand)
                         .on_hover_text("Xóa script")
@@ -9845,7 +9938,10 @@ impl ZaloGuiApp {
         if !self.script_output.trim().is_empty() {
             ui.add_space(6.0);
             ui.label(
-                RichText::new("Output").size(11.0).color(pal.text_primary).strong(),
+                RichText::new("Output")
+                    .size(11.0)
+                    .color(pal.text_primary)
+                    .strong(),
             );
             ui.label(
                 RichText::new(self.script_output.clone())
@@ -9856,7 +9952,10 @@ impl ZaloGuiApp {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("Log chạy").size(11.0).color(pal.text_primary).strong(),
+                RichText::new("Log chạy")
+                    .size(11.0)
+                    .color(pal.text_primary)
+                    .strong(),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
@@ -9889,10 +9988,16 @@ impl ZaloGuiApp {
                 }
             });
         });
-        let logs = self.script_logs_cache.get(&tid).cloned().unwrap_or_default();
+        let logs = self
+            .script_logs_cache
+            .get(&tid)
+            .cloned()
+            .unwrap_or_default();
         if logs.is_empty() {
             ui.label(
-                RichText::new("Chưa có log.").size(11.0).color(pal.text_muted),
+                RichText::new("Chưa có log.")
+                    .size(11.0)
+                    .color(pal.text_muted),
             );
         } else {
             for l in logs.iter().take(30) {
@@ -9900,11 +10005,13 @@ impl ZaloGuiApp {
                 let line = format!("{} [{}] {}", icon, l.name, l.msg);
                 let preview: String = line.chars().take(120).collect();
                 ui.label(
-                    RichText::new(preview).size(10.5).color(if l.level == "error" {
-                        Color32::from_rgb(200, 90, 90)
-                    } else {
-                        pal.text_muted
-                    }),
+                    RichText::new(preview)
+                        .size(10.5)
+                        .color(if l.level == "error" {
+                            Color32::from_rgb(200, 90, 90)
+                        } else {
+                            pal.text_muted
+                        }),
                 );
             }
         }
@@ -9934,16 +10041,16 @@ impl ZaloGuiApp {
             );
         });
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Trigger").size(11.0).color(pal.text_secondary));
+            ui.label(
+                RichText::new("Trigger")
+                    .size(11.0)
+                    .color(pal.text_secondary),
+            );
             egui::ComboBox::from_id_salt("script_trigger_combo")
                 .selected_text(self.script_trigger_draft.clone())
                 .show_ui(ui, |ui| {
                     for opt in ["manual", "on_message", "on_interval", "on_keyword"] {
-                        ui.selectable_value(
-                            &mut self.script_trigger_draft,
-                            opt.to_string(),
-                            opt,
-                        );
+                        ui.selectable_value(&mut self.script_trigger_draft, opt.to_string(), opt);
                     }
                 });
             if self.script_trigger_draft == "on_interval"
@@ -9985,12 +10092,10 @@ impl ZaloGuiApp {
         ui.horizontal(|ui| {
             if ui
                 .add(
-                    egui::Button::new(
-                        RichText::new("💾 Lưu").size(11.0).color(pal.primary_hover),
-                    )
-                    .fill(pal.primary.linear_multiply(0.12))
-                    .stroke(Stroke::new(1.0_f32, pal.primary))
-                    .rounding(Rounding::same(6.0)),
+                    egui::Button::new(RichText::new("💾 Lưu").size(11.0).color(pal.primary_hover))
+                        .fill(pal.primary.linear_multiply(0.12))
+                        .stroke(Stroke::new(1.0_f32, pal.primary))
+                        .rounding(Rounding::same(6.0)),
                 )
                 .on_hover_cursor(CursorIcon::PointingHand)
                 .clicked()
@@ -10000,7 +10105,9 @@ impl ZaloGuiApp {
             if ui
                 .add(
                     egui::Button::new(
-                        RichText::new("▶ Chạy thử").size(11.0).color(pal.primary_hover),
+                        RichText::new("▶ Chạy thử")
+                            .size(11.0)
+                            .color(pal.primary_hover),
                     )
                     .fill(Color32::TRANSPARENT)
                     .stroke(Stroke::new(1.0_f32, pal.border))
@@ -10014,11 +10121,9 @@ impl ZaloGuiApp {
             if self.script_editing_id.is_some()
                 && ui
                     .add(
-                        egui::Button::new(
-                            RichText::new("✕ Xóa").size(11.0).color(pal.text_muted),
-                        )
-                        .fill(Color32::TRANSPARENT)
-                        .frame(false),
+                        egui::Button::new(RichText::new("✕ Xóa").size(11.0).color(pal.text_muted))
+                            .fill(Color32::TRANSPARENT)
+                            .frame(false),
                     )
                     .on_hover_cursor(CursorIcon::PointingHand)
                     .clicked()
@@ -10048,7 +10153,9 @@ impl ZaloGuiApp {
             if ui
                 .add(
                     egui::Button::new(
-                        RichText::new("← Danh sách").size(11.0).color(pal.text_muted),
+                        RichText::new("← Danh sách")
+                            .size(11.0)
+                            .color(pal.text_muted),
                     )
                     .fill(Color32::TRANSPARENT)
                     .frame(false),
@@ -10178,7 +10285,10 @@ impl ZaloGuiApp {
         if !self.script_output.trim().is_empty() {
             ui.add_space(6.0);
             ui.label(
-                RichText::new("Output").size(11.0).color(pal.text_primary).strong(),
+                RichText::new("Output")
+                    .size(11.0)
+                    .color(pal.text_primary)
+                    .strong(),
             );
             ui.label(
                 RichText::new(self.script_output.clone())
@@ -10187,7 +10297,6 @@ impl ZaloGuiApp {
             );
         }
     }
-
 }
 
 /// Highlight the exact resolved row and optionally center it in the message viewport.
@@ -10293,7 +10402,6 @@ fn play_voice_attachment(url: &str, file_name: &str, msg_id: &str, download_dir:
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct MentionCandidate {
     #[allow(dead_code)]
@@ -10348,10 +10456,7 @@ impl ZaloGuiApp {
         };
         match rec.stop_and_encode() {
             Ok(record) => {
-                self.show_toast(format!(
-                    "⏳ Đang gửi thoại ({}s)…",
-                    record.duration_secs
-                ));
+                self.show_toast(format!("⏳ Đang gửi thoại ({}s)…", record.duration_secs));
                 match WORKER_TX.get() {
                     Some(tx) => {
                         // Gửi thất bại (kênh đóng) → dọn ngay, không để file mồ côi.
@@ -10630,13 +10735,9 @@ impl ZaloGuiApp {
         let (rect, resp) = ui.allocate_exact_size(
             Vec2::new(
                 ui.fonts(|f| {
-                    f.layout_no_wrap(
-                        label.clone(),
-                        FontId::proportional(12.0),
-                        pal.text_primary,
-                    )
-                    .size()
-                    .x
+                    f.layout_no_wrap(label.clone(), FontId::proportional(12.0), pal.text_primary)
+                        .size()
+                        .x
                 }) + 20.0,
                 24.0,
             ),
@@ -10797,17 +10898,31 @@ impl ZaloGuiApp {
                 .show(ctx, |ui| {
                     ui.set_min_width(300.0);
                     ui.label(
-                        RichText::new(format!("“{}”", preview.chars().take(80).collect::<String>()))
-                            .size(12.5)
-                            .color(pal.text_primary)
-                            .italics(),
+                        RichText::new(format!(
+                            "“{}”",
+                            preview.chars().take(80).collect::<String>()
+                        ))
+                        .size(12.5)
+                        .color(pal.text_primary)
+                        .italics(),
                     );
                     ui.add_space(6.0);
                     let quick: [(&str, i64); 4] = [
                         ("+15 phút", now_sec + 15 * 60),
                         ("+1 giờ", now_sec + 3600),
-                        ("Tối nay (21:00)", crate::scheduler::parse_custom_schedule_input("21:00", now_sec).unwrap_or(now_sec + 3 * 3600)),
-                        ("Mai 8h", crate::scheduler::parse_custom_schedule_input("08:00", now_sec + 86_400).unwrap_or(now_sec + 12 * 3600)),
+                        (
+                            "Tối nay (21:00)",
+                            crate::scheduler::parse_custom_schedule_input("21:00", now_sec)
+                                .unwrap_or(now_sec + 3 * 3600),
+                        ),
+                        (
+                            "Mai 8h",
+                            crate::scheduler::parse_custom_schedule_input(
+                                "08:00",
+                                now_sec + 86_400,
+                            )
+                            .unwrap_or(now_sec + 12 * 3600),
+                        ),
                     ];
                     for (label, ts) in quick {
                         if ui
@@ -10829,14 +10944,18 @@ impl ZaloGuiApp {
                     }
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Tuỳ chọn:").size(12.5).color(pal.text_secondary));
+                        ui.label(
+                            RichText::new("Tuỳ chọn:")
+                                .size(12.5)
+                                .color(pal.text_secondary),
+                        );
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut self.remind_custom_input)
                                 .hint_text("08:00, +30m, 31/12 09:30…")
                                 .desired_width(170.0),
                         );
-                        let commit = resp.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let commit =
+                            resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if ui.button("Lưu").clicked() || commit {
                             match crate::scheduler::parse_custom_schedule_input(
                                 &self.remind_custom_input,
@@ -10848,7 +10967,11 @@ impl ZaloGuiApp {
                         }
                     });
                     if let Some(e) = save_err.clone() {
-                        ui.label(RichText::new(e).size(12.0).color(Color32::from_rgb(239, 68, 68)));
+                        ui.label(
+                            RichText::new(e)
+                                .size(12.0)
+                                .color(Color32::from_rgb(239, 68, 68)),
+                        );
                     }
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {

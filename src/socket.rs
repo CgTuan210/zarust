@@ -67,6 +67,33 @@ pub const CMD_SYNC_MOBILE_WAKE_UP: u16 = 592;
 static WS_OUTBOUND_TX: std::sync::Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>> =
     std::sync::Mutex::new(None);
 
+static WS_ACTIVE_CONNECTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Return `true` while the active account's `zpw_ws` WebSocket has completed `CMD_AUTHEN`
+/// and remains open, allowing HTTP fallback polling to back off cleanly.
+pub fn is_ws_connected() -> bool {
+    WS_ACTIVE_CONNECTED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+struct ActiveWsConnectedGuard(bool);
+
+impl ActiveWsConnectedGuard {
+    fn mark_authenticated(&mut self) {
+        if self.0 {
+            WS_ACTIVE_CONNECTED.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+impl Drop for ActiveWsConnectedGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            WS_ACTIVE_CONNECTED.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
 /// Send a raw encoded frame over the active `zpw_ws` WebSocket if connected.
 pub fn send_ws_frame(cmd: u16, sub_cmd: u8, version: u8, data: Option<&Value>) -> bool {
     let frame = encode_frame(cmd, sub_cmd, version, data);
@@ -235,7 +262,11 @@ fn inflate(buf: &[u8]) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         match make(buf).read_to_end(&mut out) {
             Ok(_) if !out.is_empty() => {
-                trace(format!("inflate ok via {name}: {} -> {} bytes", buf.len(), out.len()));
+                trace(format!(
+                    "inflate ok via {name}: {} -> {} bytes",
+                    buf.len(),
+                    out.len()
+                ));
                 return Ok(out);
             }
             Ok(_) => last_err = Some(anyhow!("{name}: empty output")),
@@ -374,7 +405,10 @@ fn build_url(sess: &Session, endpoint_idx: usize) -> String {
 fn queues_from_auth(auth: &Value) -> Vec<(u16, u8)> {
     let mut out: Vec<(u16, u8)> = Vec::new();
     for key in ["ctrl_qCmds", "qCmds"] {
-        if let Some(arr) = auth.pointer(&format!("/data/{key}")).and_then(|v| v.as_array()) {
+        if let Some(arr) = auth
+            .pointer(&format!("/data/{key}"))
+            .and_then(|v| v.as_array())
+        {
             for q in arr {
                 let cmd = q.get("cmd").and_then(|v| v.as_u64());
                 let sub = q.get("subCmd").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -405,13 +439,7 @@ fn pull_frame(cmd: u16, sub_cmd: u8, req_id: &str) -> Vec<u8> {
     encode_frame(cmd, sub_cmd, 1, Some(&data))
 }
 
-fn pull_next_frame(
-    cmd: u16,
-    sub_cmd: u8,
-    req_id: &str,
-    last_id: Value,
-    pre_ids: Value,
-) -> Vec<u8> {
+fn pull_next_frame(cmd: u16, sub_cmd: u8, req_id: &str, last_id: Value, pre_ids: Value) -> Vec<u8> {
     let data = json!({
         "first": false,
         "reqId": req_id,
@@ -449,6 +477,7 @@ fn spawn_with_role(sess: Session, role: SocketRole) -> mpsc::UnboundedReceiver<W
         let mut backoff = 2u64;
         let mut endpoint_idx = 0usize;
         loop {
+            let started = std::time::Instant::now();
             match run_once(&sess, &tx, endpoint_idx, role).await {
                 Ok(reason) => trace(format!("closed: {reason}")),
                 Err(e) => trace(format!("error: {e:#}")),
@@ -456,7 +485,9 @@ fn spawn_with_role(sess: Session, role: SocketRole) -> mpsc::UnboundedReceiver<W
             if tx.is_closed() {
                 break;
             }
-            // `3002 NOT_FOUND_WORKER` means this shard does not host the session; rotate.
+            if started.elapsed() >= Duration::from_secs(10) {
+                backoff = 2;
+            }
             endpoint_idx = endpoint_idx.wrapping_add(1);
             tokio::select! {
                 _ = tx.closed() => break,
@@ -474,6 +505,7 @@ async fn run_once(
     endpoint_idx: usize,
     role: SocketRole,
 ) -> Result<String> {
+    let mut connected_guard = ActiveWsConnectedGuard(role == SocketRole::Active);
     let url = build_url(sess, endpoint_idx);
     trace(format!("connect {url}"));
 
@@ -511,10 +543,8 @@ async fn run_once(
     let mut req_id = 0u64;
     let mut ping = tokio::time::interval(Duration::from_secs(PING_SECS));
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ping.tick().await; // consume the immediate first tick
+    ping.tick().await;
 
-    // A passive socket keeps its sender private: `_out_tx` stays alive so `out_rx`
-    // simply never yields, and the global outbound slot keeps pointing at the active socket.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let _out_tx = match role {
         SocketRole::Active => {
@@ -527,8 +557,6 @@ async fn run_once(
     };
     loop {
         tokio::select! {
-            // The owner dropped the receiver (account switched or removed): close the
-            // connection instead of keeping a second session alive for that account.
             _ = tx.closed() => {
                 return Ok("receiver dropped".into());
             }
@@ -601,6 +629,7 @@ async fn run_once(
                         return Err(anyhow!("auth rejected: {text}"));
                     }
                     authed = true;
+                    connected_guard.mark_authenticated();
                     let _ = tx.send(WsEvent { cmd, sub_cmd, version, payload: auth.clone() });
 
                     for (qcmd, qsub) in queues_from_auth(&auth) {
